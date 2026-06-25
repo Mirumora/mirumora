@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mirumora Studio</title>
+  <meta name="description" content="Mirumora Studio — quiet craft for considered brands." />
+
+  <link rel="icon" type="image/svg+xml" href="assets/Logo.svg" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@300&family=Playfair+Display:wght@500&display=swap"
+    rel="stylesheet"
+  />
+
+  <style>
+    :root {
+      --cream: #f3efe8;
+      --ink: #141413;
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      height: 100%;
+    }
+
+    body {
+      background-color: var(--cream);
+      color: var(--ink);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 2rem;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+
+    .brand {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+    }
+
+    .brand__mark {
+      width: auto;
+      height: clamp(140px, 22vh, 240px);
+      margin-bottom: 2.5rem;
+    }
+
+    .brand__name {
+      font-family: "Playfair Display", Georgia, serif;
+      font-weight: 500;
+      font-size: clamp(2.75rem, 9vw, 5.25rem);
+      line-height: 1;
+      letter-spacing: 0.01em;
+    }
+
+    .brand__studio {
+      font-family: "Hanken Grotesk", "Helvetica Neue", Arial, sans-serif;
+      font-weight: 300;
+      font-size: clamp(0.9rem, 2.6vw, 1.35rem);
+      letter-spacing: 0.42em;
+      text-indent: 0.42em;
+      margin-top: 1rem;
+    }
+
+    .brand__tagline {
+      font-family: "Hanken Grotesk", "Helvetica Neue", Arial, sans-serif;
+      font-weight: 300;
+      font-size: clamp(0.85rem, 2vw, 1.05rem);
+      letter-spacing: 0.04em;
+      margin-top: 3rem;
+      opacity: 0.7;
+    }
+  </style>
+</head>
+<body>
+  <main class="brand">
+    <img class="brand__mark" src="assets/Logo.svg" alt="Mirumora Studio mark" />
+    <h1 class="brand__name">Mirumora</h1>
+    <p class="brand__studio">STUDIO</p>
+    <p class="brand__tagline">Quiet craft for considered brands.</p>
+  </main>
+</body>
+</html>
