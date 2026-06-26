@@ -220,6 +220,7 @@ body.has-custom-cursor *{ cursor: none !important; }
 .split .ch.sp{ width: 0.28em; }
 .split:hover .ch,
 .split.is-focus .ch,
+.split.is-lit .ch,
 [data-cta]:hover .split .ch,
 [data-cta].is-focus .split .ch{
   color: hsl(calc(15 + var(--i, 0) * 28), 55%, 78%);
@@ -364,18 +365,34 @@ body.has-custom-cursor *{ cursor: none !important; }
   flex-direction: column;
   align-items: center;
 }
+/* logo mark — coloured via mask so it can go rainbow on hover/click */
 .hero .mark{
-  width: auto;
   height: clamp(96px, 17vh, 168px);
+  aspect-ratio: 467 / 1277;
   margin-bottom: clamp(22px, 3.2vh, 38px);
-  filter: var(--logo-filter);
+  background: var(--bone);
+  -webkit-mask: url('assets/Logo.svg') no-repeat center / contain;
+  mask: url('assets/Logo.svg') no-repeat center / contain;
+  pointer-events: auto;
+  transition: background-color .4s ease;
 }
+.hero .mark:hover,
+.hero .mark.is-lit{
+  background: linear-gradient(180deg,
+    hsl(15, 75%, 62%), hsl(48, 78%, 62%), hsl(128, 52%, 58%),
+    hsl(192, 64%, 60%), hsl(262, 54%, 66%), hsl(322, 64%, 66%), hsl(15, 75%, 62%));
+  background-size: 100% 230%;
+  animation: mark-flow 3.2s linear infinite;
+}
+@keyframes mark-flow{ from{ background-position: 0 0; } to{ background-position: 0 230%; } }
+
 .hero h1{
   font-family: "Playfair Display", Georgia, serif;
   font-weight: 500;
   font-size: clamp(52px, 8vw, 96px);
   line-height: 1.0;
   letter-spacing: 0.005em;
+  pointer-events: auto;
 }
 .hero .studio{
   margin-top: clamp(10px, 1.4vh, 16px);
@@ -385,6 +402,7 @@ body.has-custom-cursor *{ cursor: none !important; }
   letter-spacing: 0.42em;
   text-indent: 0.42em;
   color: var(--bone-dim);
+  pointer-events: auto;
 }
 
 /* ── Wheel ───────────────────────────────── */
@@ -397,19 +415,64 @@ body.has-custom-cursor *{ cursor: none !important; }
   height: 70vh;
   z-index: 3;
   pointer-events: none;
-  opacity: 0.94;
+  opacity: 0;
   mix-blend-mode: var(--water-blend);
+  transition: opacity .8s ease;
 }
+body.cards-open .water-plane{ opacity: 0.94; }
+
 .wheel-stage{
   position: absolute;
   bottom: -22vh;
   left: 50%;
-  transform: translateX(-50%);
+  transform: translateX(-50%) translateY(42vh) scale(0.42);
+  transform-origin: 50% 100%;
   width: min(1200px, 140vw);
   height: 90vh;
   perspective: 1500px;
   perspective-origin: 50% 38%;
   z-index: 2;
+  opacity: 0;
+  pointer-events: none;
+  transition: transform .95s cubic-bezier(.2,.8,.2,1), opacity .7s ease;
+}
+body.cards-open .wheel-stage{
+  transform: translateX(-50%) translateY(0) scale(1);
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* footer circle — cards rise out of / sink back into it */
+.cards-toggle{
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid var(--bone-dim);
+  background: transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color .25s ease, box-shadow .35s ease;
+}
+.cards-toggle::after{
+  content: "";
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--bone-dim);
+  transition: width .35s cubic-bezier(.2,.8,.2,1), height .35s cubic-bezier(.2,.8,.2,1), background-color .25s ease, border-color .25s ease;
+}
+.cards-toggle:hover{ border-color: var(--bone); }
+.cards-toggle:hover::after{ background: var(--bone); }
+body.cards-open .cards-toggle{ border-color: var(--bone); box-shadow: 0 0 0 4px var(--cta-fill); }
+body.cards-open .cards-toggle::after{
+  width: 12px; height: 12px;
+  background: transparent;
+  border: 1px solid var(--bone);
 }
 .wheel{
   position: absolute;
@@ -574,12 +637,14 @@ body.has-custom-cursor *{ cursor: none !important; }
   </div>
 
   <main class="hero">
-    <img class="mark" src="assets/Logo.svg" alt="Mirumora Studio mark" />
-    <h1 data-split>Mirumora</h1>
-    <p class="studio">STUDIO</p>
+    <div class="mark" data-lit role="img" aria-label="Mirumora Studio mark"></div>
+    <h1 data-split data-lit>Mirumora</h1>
+    <p class="studio" data-split data-lit>STUDIO</p>
   </main>
 
   <div class="anchor anchor-bl">Mirumora</div>
+
+  <button class="cards-toggle" id="cardsToggle" aria-label="Show or hide the cards" aria-pressed="false"></button>
 
   <button class="theme-toggle" id="themeToggle" data-cta aria-label="Toggle light or dark mode">
     <span class="dot" aria-hidden="true"></span><span class="tlabel">Light</span>
@@ -721,6 +786,11 @@ body.has-custom-cursor *{ cursor: none !important; }
     el.classList.add('split');
   }
   document.querySelectorAll('[data-split]').forEach(splitElement);
+
+  /* Rainbow lock — click the logo / wordmark to hold the colour wash */
+  document.querySelectorAll('[data-lit]').forEach(el => {
+    el.addEventListener('click', () => el.classList.toggle('is-lit'));
+  });
 
   /* Click intercept — let the color animation play before navigation */
   document.querySelectorAll('a[data-cta]').forEach(el => {
@@ -1132,6 +1202,7 @@ body.has-custom-cursor *{ cursor: none !important; }
   let gatherTimer = null;
 
   function checkGather(){
+    if (!cardsOpen) return;    // cards are tucked away — no interaction
     if (!mouseMoved) return;   // allow even with reduced motion (user-initiated)
     if (gatherMode && dragging) return;
     const rect = wheelEl.getBoundingClientRect();
@@ -1191,34 +1262,62 @@ body.has-custom-cursor *{ cursor: none !important; }
     }
   }
 
+  let cardsOpen = false;   // cards are an opt-in toggle, hidden by default
   function wheelTick(){
     const now = performance.now();
-    if (gatherMode){
-      // continuously update card targets to follow cursor
-      const rect = wheelEl.getBoundingClientRect();
-      setCardsToStack(cursorX - rect.left, cursorY - rect.top);
-    } else {
-      // ring mode — only apply per-frame updates when not in mid-transition
-      const transitioning = wheelEl.classList.contains('gather-transition');
-      if (!transitioning){
-        if (Math.abs(dragVel) > 0.001){
-          spin += dragVel;
-          dragVel *= DECAY;
-          if (Math.abs(dragVel) < IDLE_VEL * 0.5) dragVel = 0;
-        } else if (!dragging){
-          spin += IDLE_VEL;
+    if (cardsOpen){
+      if (gatherMode){
+        // continuously update card targets to follow cursor
+        const rect = wheelEl.getBoundingClientRect();
+        setCardsToStack(cursorX - rect.left, cursorY - rect.top);
+      } else {
+        // ring mode — only apply per-frame updates when not in mid-transition
+        const transitioning = wheelEl.classList.contains('gather-transition');
+        if (!transitioning){
+          if (Math.abs(dragVel) > 0.001){
+            spin += dragVel;
+            dragVel *= DECAY;
+            if (Math.abs(dragVel) < IDLE_VEL * 0.5) dragVel = 0;
+          } else if (!dragging){
+            spin += IDLE_VEL;
+          }
+          wheelEl.style.transform = `rotateX(-14deg) rotateY(${spin}deg)`;
+          updateAlphas();
         }
-        wheelEl.style.transform = `rotateX(-14deg) rotateY(${spin}deg)`;
-        updateAlphas();
       }
+      drawWater(now);
     }
-    drawWater(now);
     requestAnimationFrame(wheelTick);
   }
   wheelEl.style.transform = `rotateX(-14deg) rotateY(0deg)`;
   resizeWater();
   updateAlphas();
   wheelTick();
+
+  /* ───── Cards toggle — rise out of / sink back into the footer circle ───── */
+  let cardsHideTimer = null;
+  const cardsToggle = document.getElementById('cardsToggle');
+  function setCards(open){
+    document.body.classList.toggle('cards-open', open);
+    if (cardsToggle) cardsToggle.setAttribute('aria-pressed', open ? 'true' : 'false');
+    if (open){
+      clearTimeout(cardsHideTimer);
+      cardsOpen = true;
+    } else {
+      setGather(false);
+      clearTimeout(cardsHideTimer);
+      // keep drawing through the sink animation, then stop and clear
+      cardsHideTimer = setTimeout(() => {
+        cardsOpen = false;
+        waterCtx.clearRect(0, 0, waterWidth, waterHeight);
+      }, 1000);
+    }
+  }
+  if (cardsToggle){
+    cardsToggle.addEventListener('click', () => {
+      setCards(!document.body.classList.contains('cards-open'));
+    });
+  }
 
   /* drag-to-flick — works in all modes; spin accumulates even while gathered */
   function getX(e){ return e.touches ? e.touches[0].clientX : e.clientX; }
