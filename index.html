@@ -876,7 +876,15 @@ body.has-custom-cursor *{ cursor: none !important; }
       ) * depth;
       const pointerWave = waveOffset(waterWidth * 0.5, y, time) * 0.14;
       const shift = idle + pointerWave + Math.sin(y * 0.13 + time * 0.0011) * energy * 1.4;
-      sliceCtx.drawImage(reflectionCanvas, 0, y, waterWidth, row, shift, y, waterWidth, row);
+      // Source rect is in the reflection canvas's backing-store pixels (which are
+      // scaled by waterDpr); the destination is in CSS pixels via sliceCtx's
+      // transform. Mixing the two is what pushed the reflection low and to the
+      // right on Retina (dpr 2) displays.
+      sliceCtx.drawImage(
+        reflectionCanvas,
+        0, y * waterDpr, waterWidth * waterDpr, row * waterDpr,
+        shift, y, waterWidth, row
+      );
     }
     waterCtx.drawImage(sliceCanvas, 0, 0, waterWidth, waterHeight);
   }
