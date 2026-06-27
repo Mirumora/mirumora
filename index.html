@@ -542,7 +542,6 @@ body.has-custom-cursor *{ cursor: none !important; }
     tx = e.clientX; ty = e.clientY;
     cursorX = e.clientX; cursorY = e.clientY;
     mouseMoved = true;
-    checkGather();
   }
 
   if (canCustomCursor){
@@ -684,6 +683,8 @@ body.has-custom-cursor *{ cursor: none !important; }
   const reflectionCtx = reflectionCanvas.getContext('2d');
   const sliceCanvas = document.createElement('canvas');
   const sliceCtx = sliceCanvas.getContext('2d');
+  const logoScratch = document.createElement('canvas');
+  const logoScratchCtx = logoScratch.getContext('2d');
 
   function resizeWater(){
     const rect = water.getBoundingClientRect();
@@ -699,7 +700,7 @@ body.has-custom-cursor *{ cursor: none !important; }
     sliceCanvas.width = Math.round(waterWidth * waterDpr);
     sliceCanvas.height = Math.round(waterHeight * waterDpr);
     sliceCtx.setTransform(waterDpr, 0, 0, waterDpr, 0, 0);
-    surfaceY = Math.max(52, Math.min(waterHeight * 0.34, waterHeight - 260));
+    surfaceY = Math.max(52, Math.min(waterHeight * 0.44, waterHeight - 240));
   }
 
   function brandIsLit(){
@@ -711,43 +712,54 @@ body.has-custom-cursor *{ cursor: none !important; }
   }
 
   function fillLogo(ctx, x, y, w, h, lit){
-    ctx.save();
-    ctx.translate(x, y);
-    if (logoImg.complete && logoImg.naturalWidth){
-      ctx.drawImage(logoImg, 0, 0, w, h);
-      ctx.globalCompositeOperation = 'source-in';
-      if (lit){
-        const grad = ctx.createLinearGradient(0, 0, 0, h);
-        grad.addColorStop(0.00, 'hsl(15, 75%, 62%)');
-        grad.addColorStop(0.18, 'hsl(48, 78%, 62%)');
-        grad.addColorStop(0.36, 'hsl(128, 52%, 58%)');
-        grad.addColorStop(0.55, 'hsl(192, 64%, 60%)');
-        grad.addColorStop(0.74, 'hsl(262, 54%, 66%)');
-        grad.addColorStop(1.00, 'hsl(322, 64%, 66%)');
-        ctx.fillStyle = grad;
-      } else {
-        ctx.fillStyle = colorForCssVar('--bone');
-      }
-      ctx.fillRect(0, 0, w, h);
+    if (!(logoImg.complete && logoImg.naturalWidth) || w <= 0 || h <= 0) return;
+    // Recolor the logo opaquely on its own scratch canvas first, then composite
+    // it once into ctx — otherwise the source-in fill and the caller's reflection
+    // alpha multiply together and the result is effectively invisible.
+    const sw = Math.max(1, Math.ceil(w));
+    const sh = Math.max(1, Math.ceil(h));
+    if (logoScratch.width !== sw) logoScratch.width = sw;
+    if (logoScratch.height !== sh) logoScratch.height = sh;
+    logoScratchCtx.clearRect(0, 0, sw, sh);
+    logoScratchCtx.drawImage(logoImg, 0, 0, sw, sh);
+    logoScratchCtx.globalCompositeOperation = 'source-in';
+    if (lit){
+      const grad = logoScratchCtx.createLinearGradient(0, 0, 0, sh);
+      grad.addColorStop(0.00, 'hsl(15, 75%, 62%)');
+      grad.addColorStop(0.18, 'hsl(48, 78%, 62%)');
+      grad.addColorStop(0.36, 'hsl(128, 52%, 58%)');
+      grad.addColorStop(0.55, 'hsl(192, 64%, 60%)');
+      grad.addColorStop(0.74, 'hsl(262, 54%, 66%)');
+      grad.addColorStop(1.00, 'hsl(322, 64%, 66%)');
+      logoScratchCtx.fillStyle = grad;
+    } else {
+      logoScratchCtx.fillStyle = colorForCssVar('--bone');
     }
-    ctx.restore();
+    logoScratchCtx.fillRect(0, 0, sw, sh);
+    logoScratchCtx.globalCompositeOperation = 'source-over';
+    ctx.drawImage(logoScratch, x, y, w, h);
   }
 
   function drawReflectionSource(){
     reflectionCtx.clearRect(0, 0, waterWidth, waterHeight);
     const waterRect = water.getBoundingClientRect();
-    const heroRect = hero.getBoundingClientRect();
     const markRect = mark.getBoundingClientRect();
     const titleRect = title.getBoundingClientRect();
     const studioRect = studio.getBoundingClientRect();
     const lit = brandIsLit();
-    const heroBottom = heroRect.bottom - waterRect.top;
-    const mirrorY = Math.max(surfaceY + 12, heroBottom + 22);
 
+    // Mirror the brand about the waterline (surfaceY) and foreshorten it, the way
+    // a real reflection compresses with distance. This keeps every reflection
+    // sitting directly under its element and pulls the tall logo up into view
+    // instead of stranding it in the faded depths.
+    const compress = 0.66;
     reflectionCtx.save();
-    reflectionCtx.translate(0, mirrorY * 2);
-    reflectionCtx.scale(1, -1);
-    reflectionCtx.globalAlpha = isLight() ? 0.13 : 0.16;
+    reflectionCtx.translate(0, surfaceY);
+    reflectionCtx.scale(1, -compress);
+    reflectionCtx.translate(0, -surfaceY);
+    // The logo sits highest, so its reflection lands deepest in the fade — give
+    // it a heavier alpha so it survives and reads under the mark.
+    reflectionCtx.globalAlpha = isLight() ? 0.30 : 0.36;
 
     fillLogo(
       reflectionCtx,
@@ -758,6 +770,7 @@ body.has-custom-cursor *{ cursor: none !important; }
       lit
     );
 
+    reflectionCtx.globalAlpha = isLight() ? 0.16 : 0.20;
     const titleStyle = getComputedStyle(title);
     reflectionCtx.textAlign = 'center';
     reflectionCtx.textBaseline = 'top';
@@ -780,14 +793,15 @@ body.has-custom-cursor *{ cursor: none !important; }
     reflectionCtx.font = studioStyle.fontWeight + ' ' + studioStyle.fontSize + ' ' + studioStyle.fontFamily;
     reflectionCtx.letterSpacing = studioStyle.letterSpacing;
     reflectionCtx.fillStyle = lit ? reflectionCtx.fillStyle : colorForCssVar('--bone-dim');
-    reflectionCtx.globalAlpha = isLight() ? 0.10 : 0.13;
+    reflectionCtx.globalAlpha = isLight() ? 0.13 : 0.16;
     reflectionCtx.fillText('STUDIO', studioRect.left - waterRect.left + studioRect.width / 2, studioRect.top - waterRect.top);
     reflectionCtx.restore();
 
     reflectionCtx.save();
     const fade = reflectionCtx.createLinearGradient(0, surfaceY, 0, waterHeight);
-    fade.addColorStop(0, 'rgba(0,0,0,0.72)');
-    fade.addColorStop(0.34, 'rgba(0,0,0,0.28)');
+    fade.addColorStop(0, 'rgba(0,0,0,0.42)');
+    fade.addColorStop(0.10, 'rgba(0,0,0,0.82)');
+    fade.addColorStop(0.5, 'rgba(0,0,0,0.42)');
     fade.addColorStop(1, 'rgba(0,0,0,0)');
     reflectionCtx.globalCompositeOperation = 'destination-in';
     reflectionCtx.fillStyle = fade;
@@ -855,7 +869,11 @@ body.has-custom-cursor *{ cursor: none !important; }
         const dy = Math.abs(y - ripple.y);
         energy += Math.max(0, 1 - dy / 180) * ripple.life * ripple.strength;
       }
-      const idle = Math.sin(y * 0.045 + time * 0.0007) * 0.24 * depth;
+      const idle = (
+        Math.sin(y * 0.045 + time * 0.00070) * 0.6 +
+        Math.sin(y * 0.110 + time * 0.00130) * 0.3 +
+        Math.sin(y * 0.021 - time * 0.00050) * 0.5
+      ) * depth;
       const pointerWave = waveOffset(waterWidth * 0.5, y, time) * 0.14;
       const shift = idle + pointerWave + Math.sin(y * 0.13 + time * 0.0011) * energy * 1.4;
       sliceCtx.drawImage(reflectionCanvas, 0, y, waterWidth, row, shift, y, waterWidth, row);
@@ -887,7 +905,10 @@ body.has-custom-cursor *{ cursor: none !important; }
     waterCtx.save();
     waterCtx.beginPath();
     for (let x = 0; x <= waterWidth; x += 12){
-      const y = surfaceY + waveOffset(x, surfaceY, time) * 0.26;
+      const y = surfaceY
+        + Math.sin(x * 0.013 + time * 0.0009) * 1.2
+        + Math.sin(x * 0.031 - time * 0.0013) * 0.6
+        + waveOffset(x, surfaceY, time) * 0.26;
       if (x === 0) waterCtx.moveTo(x, y);
       else waterCtx.lineTo(x, y);
     }
