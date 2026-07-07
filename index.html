@@ -259,6 +259,16 @@ body.has-custom-cursor *{ cursor: none !important; }
   transition: transform .3s cubic-bezier(.2,.8,.2,1);
 }
 :root[data-theme="dark"] .theme-toggle .dot{ transform: rotate(180deg); }
+.sound-toggle{ right: 132px; }
+.sound-toggle .sdot{
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  background: currentColor;
+  transition: background .25s ease;
+}
+.sound-toggle.is-muted .sdot{ background: transparent; }
 
 /* top-right menu */
 .menu{
@@ -437,6 +447,7 @@ body.has-custom-cursor *{ cursor: none !important; }
   .anchor{ bottom: 18px; font-size: 9px; }
   .anchor-bl{ left: 22px; letter-spacing: 0.24em; }
   .theme-toggle{ right: 22px; bottom: 16px; font-size: 9px; letter-spacing: 0.24em; }
+  .sound-toggle{ right: 104px; }
   .hero{ padding: 0 22px; margin-top: -12vh; }
   .menu-panel{ min-width: 170px; }
   .menu-panel a, .menu-panel .soon{ font-size: 20px; }
@@ -479,6 +490,10 @@ body.has-custom-cursor *{ cursor: none !important; }
   </main>
 
   <div class="anchor anchor-bl">Mirumora</div>
+
+  <button class="theme-toggle sound-toggle" id="soundToggle" data-cta aria-label="Toggle sound">
+    <span class="sdot" aria-hidden="true"></span><span class="slabel">Sound</span>
+  </button>
 
   <button class="theme-toggle" id="themeToggle" data-cta aria-label="Toggle light or dark mode">
     <span class="dot" aria-hidden="true"></span><span class="tlabel">Light</span>
@@ -534,10 +549,309 @@ body.has-custom-cursor *{ cursor: none !important; }
   applyTheme(storedTheme === 'dark' ? 'dark' : 'light');
   const themeToggle = document.getElementById('themeToggle');
   if (themeToggle){
-    themeToggle.addEventListener('click', () => applyTheme(isLight() ? 'dark' : 'light'));
+    themeToggle.addEventListener('click', e => {
+      applyTheme(isLight() ? 'dark' : 'light');
+      sound.tick(e.clientX);
+    });
   }
 
   const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  /* ───── Sound design — procedural Web Audio, no samples ─────
+     Everything is synthesized live: water taps are pitch-dropping sines with
+     a whisper of noise splash, dust lands as tiny wet pentatonic plinks, a
+     click blooms into a bell arpeggio over a warm low swell. Pitch and level
+     are randomized per event so nothing ever repeats exactly. The context is
+     created lazily on the first user gesture (browser autoplay policy). */
+  const sound = (function(){
+    const KEY = 'mir-sound';
+    let muted = false;
+    try { muted = localStorage.getItem(KEY) === 'off'; } catch(e){}
+    let ctx = null, master = null, verbSend = null, analyser = null;
+    let noiseBuf = null;
+    let lastSwish = 0, lastPlink = 0;
+    const PENTA = [880, 987.77, 1108.73, 1318.51, 1479.98, 1760];  // A major pentatonic
+
+    function ensure(){
+      if (ctx) return true;
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return false;
+      ctx = new AC();
+      master = ctx.createGain();
+      master.gain.value = 0.5;
+      const comp = ctx.createDynamicsCompressor();
+      comp.threshold.value = -26;
+      comp.knee.value = 24;
+      comp.ratio.value = 5;
+      master.connect(comp);
+      comp.connect(ctx.destination);
+      analyser = ctx.createAnalyser();
+      analyser.fftSize = 512;
+      comp.connect(analyser);
+      // soft procedural reverb tail shared by every voice
+      const verb = ctx.createConvolver();
+      const len = Math.floor(ctx.sampleRate * 1.7);
+      const impulse = ctx.createBuffer(2, len, ctx.sampleRate);
+      for (let ch = 0; ch < 2; ch++){
+        const data = impulse.getChannelData(ch);
+        for (let i = 0; i < len; i++){
+          data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.6);
+        }
+      }
+      verb.buffer = impulse;
+      verbSend = ctx.createGain();
+      verbSend.gain.value = 0.5;
+      verbSend.connect(verb);
+      verb.connect(master);
+      noiseBuf = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
+      const nd = noiseBuf.getChannelData(0);
+      for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+      return true;
+    }
+
+    function unlock(){
+      if (muted || !ensure()) return;
+      if (ctx.state === 'suspended') ctx.resume();
+    }
+
+    function ok(){
+      if (muted || !ctx) return false;
+      if (ctx.state === 'suspended') ctx.resume();
+      return ctx.state === 'running';
+    }
+
+    function voice(x, wet){
+      const g = ctx.createGain();
+      let tail = g;
+      if (ctx.createStereoPanner){
+        const p = ctx.createStereoPanner();
+        p.pan.value = Math.max(-0.8, Math.min(0.8, ((x == null ? innerWidth / 2 : x) / innerWidth) * 1.6 - 0.8));
+        g.connect(p);
+        tail = p;
+      }
+      tail.connect(master);
+      if (wet){
+        const w = ctx.createGain();
+        w.gain.value = wet;
+        tail.connect(w);
+        w.connect(verbSend);
+      }
+      return g;
+    }
+
+    function noiseSrc(){
+      const n = ctx.createBufferSource();
+      n.buffer = noiseBuf;
+      n.loop = true;
+      n.playbackRate.value = 0.85 + Math.random() * 0.3;
+      return n;
+    }
+
+    function bell(freq, at, amp, x){
+      const g = voice(x, 0.8);
+      const o = ctx.createOscillator();
+      o.type = 'sine';
+      o.frequency.value = freq * (0.996 + Math.random() * 0.008);
+      const o2 = ctx.createOscillator();
+      o2.type = 'sine';
+      o2.frequency.value = freq * 3.01;
+      const g2 = ctx.createGain();
+      g2.gain.value = 0.22;
+      o2.connect(g2);
+      g2.connect(g);
+      g.gain.setValueAtTime(0, at);
+      g.gain.linearRampToValueAtTime(amp, at + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, at + 1.1);
+      o.connect(g);
+      o.start(at); o.stop(at + 1.2);
+      o2.start(at); o2.stop(at + 1.2);
+    }
+
+    return {
+      unlock,
+      get muted(){ return muted; },
+      toggle(){
+        muted = !muted;
+        try { localStorage.setItem(KEY, muted ? 'off' : 'on'); } catch(e){}
+        if (!muted){
+          unlock();
+          if (ok()) bell(PENTA[2], ctx.currentTime, 0.03, innerWidth - 100);
+        }
+        return muted;
+      },
+      level(){
+        if (!analyser) return 0;
+        const buf = new Uint8Array(analyser.fftSize);
+        analyser.getByteTimeDomainData(buf);
+        let sum = 0;
+        for (let i = 0; i < buf.length; i++){ const v = (buf[i] - 128) / 128; sum += v * v; }
+        return Math.sqrt(sum / buf.length);
+      },
+
+      // water tap — the classic "bloop": quick pitch drop + noise splash
+      plop(force, x){
+        if (!ok()) return;
+        const t = ctx.currentTime;
+        const f = Math.min(2.4, force);
+        const g = voice(x, 0.35);
+        const f0 = 300 - f * 60 + Math.random() * 40;
+        const o = ctx.createOscillator();
+        o.type = 'sine';
+        o.frequency.setValueAtTime(f0 * 1.6, t);
+        o.frequency.exponentialRampToValueAtTime(f0 * 0.55, t + 0.16 + f * 0.05);
+        g.gain.setValueAtTime(0, t);
+        g.gain.linearRampToValueAtTime(0.05 + f * 0.055, t + 0.012);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.28 + f * 0.09);
+        o.connect(g);
+        o.start(t); o.stop(t + 0.6);
+        if (f > 0.9){
+          const n = noiseSrc();
+          const bp = ctx.createBiquadFilter();
+          bp.type = 'bandpass';
+          bp.frequency.value = 1400 + Math.random() * 900;
+          bp.Q.value = 1.1;
+          const ng = voice(x, 0.5);
+          ng.gain.setValueAtTime(0, t);
+          ng.gain.linearRampToValueAtTime(0.014 + f * 0.012, t + 0.02);
+          ng.gain.exponentialRampToValueAtTime(0.0001, t + 0.24);
+          n.connect(bp);
+          bp.connect(ng);
+          n.start(t); n.stop(t + 0.3);
+        }
+      },
+
+      // dragging through the water — a barely-there filtered wash
+      swish(force, x){
+        if (!ok()) return;
+        const t = ctx.currentTime;
+        if (t - lastSwish < 0.09) return;
+        lastSwish = t;
+        const n = noiseSrc();
+        const lp = ctx.createBiquadFilter();
+        lp.type = 'lowpass';
+        lp.frequency.setValueAtTime(300, t);
+        lp.frequency.linearRampToValueAtTime(700 + force * 300, t + 0.05);
+        lp.frequency.linearRampToValueAtTime(250, t + 0.22);
+        const g = voice(x, 0.3);
+        g.gain.setValueAtTime(0, t);
+        g.gain.linearRampToValueAtTime(0.008 + Math.min(0.014, force * 0.008), t + 0.04);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.26);
+        n.connect(lp);
+        lp.connect(g);
+        n.start(t); n.stop(t + 0.3);
+      },
+
+      // a dust flake meets the water — tiny wet plink, far away in the reverb
+      plink(x, size){
+        if (!ok()) return;
+        const t = ctx.currentTime;
+        if (t - lastPlink < 0.045 || Math.random() < 0.35) return;
+        lastPlink = t;
+        const base = PENTA[(Math.random() * PENTA.length) | 0] * (Math.random() < 0.3 ? 2 : 1);
+        const g = voice(x, 0.85);
+        const o = ctx.createOscillator();
+        o.type = 'sine';
+        o.frequency.value = base * (0.99 + Math.random() * 0.02);
+        const o2 = ctx.createOscillator();
+        o2.type = 'sine';
+        o2.frequency.value = base * 2.76;
+        const g2 = ctx.createGain();
+        g2.gain.value = 0.35;
+        o2.connect(g2);
+        g2.connect(g);
+        g.gain.setValueAtTime(0, t);
+        g.gain.linearRampToValueAtTime(0.010 + Math.min(0.02, size * 0.012), t + 0.006);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.5 + Math.random() * 0.4);
+        o.connect(g);
+        o.start(t); o.stop(t + 1);
+        o2.start(t); o2.stop(t + 1);
+      },
+
+      // click pulse — ascending bell arpeggio over a warm swell that lingers
+      chime(x){
+        if (!ok()) return;
+        const t = ctx.currentTime;
+        const rootIdx = (Math.random() * 3) | 0;
+        [0, 1, 2, 4].forEach((step, i) => {
+          const idx = rootIdx + step;
+          const f = PENTA[idx % PENTA.length] * (idx >= PENTA.length ? 2 : 1) / 2;
+          bell(f, t + i * 0.07, 0.028, x);
+        });
+        const o = ctx.createOscillator();
+        o.type = 'sine';
+        o.frequency.value = 110 + Math.random() * 8;
+        const g = voice(x, 0.4);
+        g.gain.setValueAtTime(0, t);
+        g.gain.linearRampToValueAtTime(0.030, t + 0.30);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 2.2);
+        o.connect(g);
+        o.start(t); o.stop(t + 2.4);
+      },
+
+      // the glow catches — a soft airy sweep upward
+      shimmer(x){
+        if (!ok()) return;
+        const t = ctx.currentTime;
+        const n = noiseSrc();
+        const bp = ctx.createBiquadFilter();
+        bp.type = 'bandpass';
+        bp.Q.value = 2.2;
+        bp.frequency.setValueAtTime(900, t);
+        bp.frequency.exponentialRampToValueAtTime(2400, t + 0.35);
+        const g = voice(x, 0.7);
+        g.gain.setValueAtTime(0, t);
+        g.gain.linearRampToValueAtTime(0.012, t + 0.08);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.5);
+        n.connect(bp);
+        bp.connect(g);
+        n.start(t); n.stop(t + 0.55);
+      },
+
+      // menus and toggles — one soft woody tick
+      tick(x){
+        if (!ok()) return;
+        const t = ctx.currentTime;
+        const n = noiseSrc();
+        const bp = ctx.createBiquadFilter();
+        bp.type = 'bandpass';
+        bp.frequency.value = 1900 + Math.random() * 300;
+        bp.Q.value = 4;
+        const g = voice(x, 0.25);
+        g.gain.setValueAtTime(0, t);
+        g.gain.linearRampToValueAtTime(0.030, t + 0.004);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.07);
+        n.connect(bp);
+        bp.connect(g);
+        n.start(t); n.stop(t + 0.09);
+        const o = ctx.createOscillator();
+        o.type = 'sine';
+        o.frequency.value = 620 + Math.random() * 60;
+        const og = voice(x, 0.3);
+        og.gain.setValueAtTime(0, t);
+        og.gain.linearRampToValueAtTime(0.016, t + 0.006);
+        og.gain.exponentialRampToValueAtTime(0.0001, t + 0.11);
+        o.connect(og);
+        o.start(t); o.stop(t + 0.13);
+      }
+    };
+  })();
+  window.__mirSound = sound;   // small debug handle (used by automated checks)
+
+  addEventListener('pointerdown', () => sound.unlock(), { passive: true });
+  addEventListener('keydown', () => sound.unlock());
+
+  const soundToggle = document.getElementById('soundToggle');
+  function reflectSoundState(){
+    soundToggle.classList.toggle('is-muted', sound.muted);
+    const slabel = soundToggle.querySelector('.slabel');
+    if (slabel) slabel.textContent = sound.muted ? 'Muted' : 'Sound';
+  }
+  reflectSoundState();
+  soundToggle.addEventListener('click', () => {
+    sound.toggle();
+    reflectSoundState();
+  });
+
   // Robust detection: only show custom cursor on devices with a primary mouse-like pointer
   const finePointer = matchMedia('(hover: hover) and (pointer: fine)').matches;
   const canCustomCursor =
@@ -719,6 +1033,7 @@ body.has-custom-cursor *{ cursor: none !important; }
     if (t){
       if (!brandGlow.current || brandGlow.current.el !== t.el){
         if (brandGlow.current && brandGlow.current.strength > 0.05) brandGlow.fading.push(brandGlow.current);
+        else sound.shimmer(t.x);   // the glow catches from cold
         brandGlow.current = { el: t.el, x: t.x, y: t.y, strength: 0 };
       }
       const c = brandGlow.current;
@@ -771,6 +1086,7 @@ body.has-custom-cursor *{ cursor: none !important; }
     el.addEventListener('click', e => {
       brandGlow.pulses.push({ el, x: e.clientX, y: e.clientY, age: 0, life: 1500 });
       spawnBrandMagic(el, e.clientX, e.clientY, 'click');
+      sound.chime(e.clientX);
       if (brandGlow.pinned && brandGlow.pinned.el === el) brandGlow.pinned = null;
       else brandGlow.pinned = { el, x: e.clientX, y: e.clientY };
     });
@@ -802,6 +1118,7 @@ body.has-custom-cursor *{ cursor: none !important; }
   const menu = document.getElementById('menu');
   const menuToggle = document.querySelector('[data-menu-toggle]');
   menuToggle.addEventListener('click', e => {
+    sound.tick(e.clientX);
     e.stopPropagation();
     const open = menu.classList.toggle('is-open');
     menuToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
@@ -1045,14 +1362,15 @@ body.has-custom-cursor *{ cursor: none !important; }
   function disturbFromPointer(x, y, force){
     const waterRect = water.getBoundingClientRect();
     const localY = y - waterRect.top;
-    if (localY < surfaceY - 18 || localY > waterHeight + 12) return;
+    if (localY < surfaceY - 18 || localY > waterHeight + 12) return false;
     if (simWater){
       simWater.disturb(x - waterRect.left, localY, force);
       if (force >= 1) spawnDrops(x, y, force);
-      return;
+      return true;
     }
     addRipple(x, y, force);
     spawnDrops(x, y, force);
+    return true;
   }
 
   function disturbFromMagicDust(x, y, force){
@@ -1147,6 +1465,7 @@ body.has-custom-cursor *{ cursor: none !important; }
             dust.impacted = true;
             // each flake lands with a small but genuinely visible ring
             disturbFromMagicDust(dust.x, dust.y, 0.5 + dust.size * (dust.click ? 0.45 : 0.30));
+            sound.plink(dust.x, dust.size);
             if (dust.size > 1.1 || Math.random() < 0.35) spawnDrops(dust.x, dust.y, 0.7);
           }
           if (simWater){
@@ -1739,7 +2058,8 @@ body.has-custom-cursor *{ cursor: none !important; }
     pointerInsideWater = localY >= surfaceY - 16 && localY <= waterHeight;
     const movement = Math.hypot(pointerX - lastPointerX, pointerY - lastPointerY);
     if (pointerInsideWater && (e.buttons || movement > (simWater ? 2 : 8) || !wasInside)){
-      disturbFromPointer(pointerX, pointerY, Math.min(2.4, 0.45 + movement * 0.035 + (e.buttons ? 0.8 : 0)));
+      const force = Math.min(2.4, 0.45 + movement * 0.035 + (e.buttons ? 0.8 : 0));
+      if (disturbFromPointer(pointerX, pointerY, force) && movement > 3) sound.swish(force, pointerX);
     }
     lastPointerX = pointerX;
     lastPointerY = pointerY;
@@ -1748,7 +2068,7 @@ body.has-custom-cursor *{ cursor: none !important; }
   addEventListener('pointerdown', e => {
     pointerX = e.clientX;
     pointerY = e.clientY;
-    disturbFromPointer(pointerX, pointerY, 2.1);
+    if (disturbFromPointer(pointerX, pointerY, 2.1)) sound.plop(2.1, pointerX);
   }, { passive: true });
 
   addEventListener('pointerleave', () => {
