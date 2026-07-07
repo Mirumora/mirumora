@@ -375,7 +375,7 @@ body.has-custom-cursor *{ cursor: none !important; }
   -webkit-mask: url('assets/Logo.svg') no-repeat center / contain;
   mask: url('assets/Logo.svg') no-repeat center / contain;
   pointer-events: auto;
-  transition: --lit-strength .22s ease;
+  /* strength is eased per-frame in JS — a CSS transition here would double-lag it */
 }
 
 .hero h1{
@@ -417,7 +417,6 @@ body.has-custom-cursor *{ cursor: none !important; }
   height: 100%;
   z-index: 5;
   pointer-events: none;
-  mix-blend-mode: screen;
 }
 
 /* bottom anchors */
@@ -621,11 +620,17 @@ body.has-custom-cursor *{ cursor: none !important; }
   }
   document.querySelectorAll('[data-split]').forEach(splitElement);
 
-  /* Local rainbow source — hover follows the cursor; click pins that point. */
+  /* Local rainbow source — the glow chases the cursor with easing, lingers
+     after it leaves, and a click fires a pulse that ripples out through the
+     letters plus a breathing afterglow pinned at the click point. All motion
+     happens per-frame in animateBrandGlow, so nothing snaps. */
   const brandGlow = {
-    active: null,
-    pinned: null,
-    signature: ''
+    target: null,    // where the pointer is right now
+    current: null,   // eased glow chasing the target
+    pinned: null,    // click-pinned breathing afterglow
+    fading: [],      // glows still easing out
+    pulses: [],      // click shockwaves radiating through the letters
+    emitClock: 0
   };
 
   function markReflectionDirty(){
@@ -640,33 +645,68 @@ body.has-custom-cursor *{ cursor: none !important; }
     return (15 + distance * 1.85) % 360;
   }
 
-  function setMarkGlow(el, x, y, strength){
-    const rect = el.getBoundingClientRect();
-    const px = clamp01((x - rect.left) / Math.max(1, rect.width)) * 100;
-    const py = clamp01((y - rect.top) / Math.max(1, rect.height)) * 100;
-    el.style.setProperty('--lit-x', px.toFixed(2) + '%');
-    el.style.setProperty('--lit-y', py.toFixed(2) + '%');
-    el.style.setProperty('--lit-strength', strength.toFixed(3));
+  function pulseRadius(p){ return p.age * 0.30; }
+  function pulseFade(p){ return Math.pow(1 - p.age / p.life, 1.6); }
+
+  function glowSourcesFor(el, time){
+    const list = [];
+    if (brandGlow.current && brandGlow.current.el === el && brandGlow.current.strength > 0.015) list.push(brandGlow.current);
+    if (brandGlow.pinned && brandGlow.pinned.el === el){
+      list.push({ x: brandGlow.pinned.x, y: brandGlow.pinned.y, strength: 0.62 + Math.sin(time * 0.0019) * 0.16 });
+    }
+    for (const g of brandGlow.fading){
+      if (g.el === el && g.strength > 0.015) list.push(g);
+    }
+    return list;
   }
 
-  function setSplitGlow(el, x, y, strength){
+  function applyMarkGlow(sources, pulses){
+    let strength = 0, best = null;
+    for (const s of sources){
+      if (s.strength > strength){ strength = s.strength; best = s; }
+    }
+    let total = Math.min(1.15, sources.reduce((sum, s) => sum + s.strength, 0));
+    for (const p of pulses) total = Math.min(1.3, total + pulseFade(p) * 0.85);
+    const anchor = best || (pulses.length ? pulses[pulses.length - 1] : null);
+    if (!anchor || total <= 0.015){
+      mark.style.setProperty('--lit-strength', '0');
+      return;
+    }
+    const rect = mark.getBoundingClientRect();
+    mark.style.setProperty('--lit-x', (clamp01((anchor.x - rect.left) / Math.max(1, rect.width)) * 100).toFixed(2) + '%');
+    mark.style.setProperty('--lit-y', (clamp01((anchor.y - rect.top) / Math.max(1, rect.height)) * 100).toFixed(2) + '%');
+    mark.style.setProperty('--lit-strength', total.toFixed(3));
+  }
+
+  function applySplitGlow(el, sources, pulses){
     const rect = el.getBoundingClientRect();
     const radius = Math.max(86, Math.min(170, rect.width * 0.32));
     let any = false;
     el.querySelectorAll('.ch:not(.sp)').forEach(ch => {
       const chRect = ch.getBoundingClientRect();
-      const dx = chRect.left + chRect.width / 2 - x;
-      const dy = chRect.top + chRect.height / 2 - y;
-      const d = Math.hypot(dx, dy);
-      const alpha = clamp01(1 - d / radius) * strength;
-      const hue = localHue(d);
-      ch.style.setProperty('--lit-alpha', alpha.toFixed(3));
-      ch.style.setProperty('--lit-hue', hue.toFixed(2));
+      const cx = chRect.left + chRect.width / 2;
+      const cy = chRect.top + chRect.height / 2;
+      let alpha = 0, hueD = 0;
+      for (const s of sources){
+        const d = Math.hypot(cx - s.x, cy - s.y);
+        const a = clamp01(1 - d / radius) * s.strength;
+        if (a > alpha){ alpha = a; hueD = d; }
+      }
+      for (const p of pulses){
+        const d = Math.hypot(cx - p.x, cy - p.y);
+        const band = d - pulseRadius(p);
+        const a = Math.exp(-band * band / 1500) * pulseFade(p);
+        if (a > alpha){ alpha = a; hueD = d; }
+      }
       if (alpha > 0.02){
+        const hue = localHue(hueD);
+        ch.style.setProperty('--lit-alpha', alpha.toFixed(3));
+        ch.style.setProperty('--lit-hue', hue.toFixed(2));
         ch.style.color = 'hsl(' + hue.toFixed(2) + ', 58%, 72%)';
         ch.style.textShadow = '0 0 ' + (2 + alpha * 14).toFixed(2) + 'px hsla(' + hue.toFixed(2) + ', 66%, 70%, ' + (alpha * 0.48).toFixed(3) + ')';
         any = true;
       } else {
+        ch.style.setProperty('--lit-alpha', '0');
         ch.style.color = '';
         ch.style.textShadow = '';
       }
@@ -674,61 +714,65 @@ body.has-custom-cursor *{ cursor: none !important; }
     el.classList.toggle('is-local-lit', any);
   }
 
-  function clearLocalGlow(el){
-    if (el.classList.contains('mark')){
-      el.style.setProperty('--lit-strength', '0');
-    } else {
-      el.querySelectorAll('.ch').forEach(ch => {
-        ch.style.setProperty('--lit-alpha', '0');
-        ch.style.color = '';
-        ch.style.textShadow = '';
-      });
-      el.classList.remove('is-local-lit');
+  function animateBrandGlow(time, dt){
+    const t = brandGlow.target;
+    if (t){
+      if (!brandGlow.current || brandGlow.current.el !== t.el){
+        if (brandGlow.current && brandGlow.current.strength > 0.05) brandGlow.fading.push(brandGlow.current);
+        brandGlow.current = { el: t.el, x: t.x, y: t.y, strength: 0 };
+      }
+      const c = brandGlow.current;
+      const k = 1 - Math.exp(-dt / 90);
+      c.x += (t.x - c.x) * k;
+      c.y += (t.y - c.y) * k;
+      c.strength = Math.min(1, c.strength + dt / 170);
+    } else if (brandGlow.current){
+      brandGlow.current.strength -= dt / 640;
+      if (brandGlow.current.strength <= 0.015) brandGlow.current = null;
     }
-  }
+    for (let i = brandGlow.fading.length - 1; i >= 0; i--){
+      brandGlow.fading[i].strength -= dt / 400;
+      if (brandGlow.fading[i].strength <= 0.015) brandGlow.fading.splice(i, 1);
+    }
+    for (let i = brandGlow.pulses.length - 1; i >= 0; i--){
+      brandGlow.pulses[i].age += dt;
+      if (brandGlow.pulses[i].age >= brandGlow.pulses[i].life) brandGlow.pulses.splice(i, 1);
+    }
 
-  function setBrandGlow(el, x, y, strength = 1, pinned = false){
-    if (el.classList.contains('mark')) setMarkGlow(el, x, y, strength);
-    else setSplitGlow(el, x, y, strength);
-    brandGlow.active = { el, x, y, strength, pinned };
-    brandGlow.signature = el.className + ':' + Math.round(x) + ':' + Math.round(y) + ':' + strength.toFixed(2) + ':' + (pinned ? '1' : '0');
-    markReflectionDirty();
-  }
+    let active = false;
+    [mark, title, studio].forEach(el => {
+      const sources = glowSourcesFor(el, time);
+      const pulses = brandGlow.pulses.filter(p => p.el === el);
+      if (sources.length || pulses.length) active = true;
+      if (sources.length || pulses.length || el.__hadGlow){
+        if (el === mark) applyMarkGlow(sources, pulses);
+        else applySplitGlow(el, sources, pulses);
+        el.__hadGlow = sources.length > 0 || pulses.length > 0;
+      }
+    });
+    if (active) markReflectionDirty();
 
-  function clearBrandGlow(el){
-    if (brandGlow.pinned && brandGlow.pinned.el === el) return;
-    clearLocalGlow(el);
-    if (brandGlow.active && brandGlow.active.el === el){
-      brandGlow.active = brandGlow.pinned;
-      if (brandGlow.pinned) setBrandGlow(brandGlow.pinned.el, brandGlow.pinned.x, brandGlow.pinned.y, 1, true);
-      else markReflectionDirty();
+    // steady drizzle of dust from wherever the brand is lit
+    brandGlow.emitClock += dt;
+    const emitter = (brandGlow.current && brandGlow.current.strength > 0.25) ? brandGlow.current : brandGlow.pinned;
+    if (!reduced && emitter && brandGlow.emitClock > 95){
+      brandGlow.emitClock = 0;
+      spawnBrandMagic(emitter.el, emitter.x, emitter.y, 'hover');
     }
   }
 
   document.querySelectorAll('[data-lit]').forEach(el => {
-    el.addEventListener('pointerenter', e => {
-      if (brandGlow.pinned) return;
-      setBrandGlow(el, e.clientX, e.clientY);
-    });
-    el.addEventListener('pointermove', e => {
-      if (brandGlow.pinned) return;
-      setBrandGlow(el, e.clientX, e.clientY);
-    });
+    const follow = e => { brandGlow.target = { el, x: e.clientX, y: e.clientY }; };
+    el.addEventListener('pointerenter', follow);
+    el.addEventListener('pointermove', follow);
     el.addEventListener('pointerleave', () => {
-      if (!brandGlow.pinned) clearBrandGlow(el);
+      if (brandGlow.target && brandGlow.target.el === el) brandGlow.target = null;
     });
     el.addEventListener('click', e => {
-      spawnBrandMagic(el, e.clientX, e.clientY);
-      if (brandGlow.pinned && brandGlow.pinned.el === el){
-        brandGlow.pinned = null;
-        clearLocalGlow(el);
-        brandGlow.active = null;
-        markReflectionDirty();
-        return;
-      }
-      if (brandGlow.pinned && brandGlow.pinned.el !== el) clearLocalGlow(brandGlow.pinned.el);
-      brandGlow.pinned = { el, x: e.clientX, y: e.clientY, strength: 1, pinned: true };
-      setBrandGlow(el, e.clientX, e.clientY, 1, true);
+      brandGlow.pulses.push({ el, x: e.clientX, y: e.clientY, age: 0, life: 1500 });
+      spawnBrandMagic(el, e.clientX, e.clientY, 'click');
+      if (brandGlow.pinned && brandGlow.pinned.el === el) brandGlow.pinned = null;
+      else brandGlow.pinned = { el, x: e.clientX, y: e.clientY };
     });
   });
 
@@ -797,11 +841,13 @@ body.has-custom-cursor *{ cursor: none !important; }
   let lastPointerX = pointerX;
   let lastPointerY = pointerY;
   let lastWaterTime = performance.now();
+  let lastMagicTime = performance.now();
   let pointerInsideWater = false;
   const ripples = [];
   const drops = [];
   const magicDust = [];
   const magicBursts = [];
+  const underDust = [];  // flakes below the surface — rendered inside the water sim so real waves refract them
   let simWater = null;   // WebGL2 ripple physics — null means the legacy 2D path runs
   let simEnergy = 0;     // recent-disturbance energy, drives the surface glow pulse
 
@@ -835,7 +881,14 @@ body.has-custom-cursor *{ cursor: none !important; }
   }
 
   function brandGlowState(){
-    return brandGlow.pinned || brandGlow.active;
+    // The reflection mirrors the strongest single glow — pulses and cross-fades
+    // stay above the surface where they read clearly.
+    let best = null;
+    if (brandGlow.current && brandGlow.current.strength > 0.02) best = brandGlow.current;
+    if (brandGlow.pinned && (!best || best.strength < 0.7)){
+      best = { el: brandGlow.pinned.el, x: brandGlow.pinned.x, y: brandGlow.pinned.y, strength: 0.7 };
+    }
+    return best;
   }
 
   function brandGlowSignature(){
@@ -1000,6 +1053,163 @@ body.has-custom-cursor *{ cursor: none !important; }
     }
     addRipple(x, y, force);
     spawnDrops(x, y, force);
+  }
+
+  function disturbFromMagicDust(x, y, force){
+    const waterRect = water.getBoundingClientRect();
+    const localY = y - waterRect.top;
+    // tight radius — a dust flake makes a small, sharp ring, not a finger-sized plop
+    if (simWater) simWater.disturb(x - waterRect.left, localY, force, 0.55);
+    else addRipple(x, y, force);
+    simEnergy = Math.min(3, simEnergy + force * 0.18);
+  }
+
+  function spawnBrandMagic(el, x, y, mode = 'click'){
+    const rect = el.getBoundingClientRect();
+    const sourceX = Math.max(rect.left, Math.min(rect.right, x));
+    const sourceY = Math.max(rect.top, Math.min(rect.bottom, y));
+    const baseHue = localHue(Math.hypot(sourceX - rect.left, sourceY - rect.top));
+    const click = mode === 'click';
+    if (click || Math.random() > 0.45){
+      magicBursts.push({
+        x: sourceX,
+        y: sourceY,
+        hue: baseHue,
+        age: 0,
+        life: reduced ? 460 : click ? 980 : 360,
+        radius: Math.max(26, Math.min(click ? 150 : 62, rect.width * (el === mark ? (click ? 1.05 : 0.48) : (click ? 0.42 : 0.20))))
+      });
+    }
+
+    if (reduced) return;
+    const count = click ? (el === mark ? 72 : 54) : (el === mark ? 5 : 3);
+    for (let i = 0; i < count; i++){
+      const fountain = click && Math.random() < 0.34;
+      const angle = fountain ? -Math.PI * 0.88 + Math.random() * Math.PI * 0.76 : Math.PI * 0.38 + Math.random() * Math.PI * 0.24;
+      const speed = fountain ? 0.070 + Math.random() * 0.120 : (click ? 0.040 + Math.random() * 0.120 : 0.025 + Math.random() * 0.050);
+      const drift = click ? 0.052 : 0.022;
+      magicDust.push({
+        x: sourceX + (Math.random() - 0.5) * rect.width * (click ? 0.18 : 0.08),
+        y: sourceY + (Math.random() - 0.5) * rect.height * (click ? 0.18 : 0.08),
+        vx: Math.cos(angle) * speed + (Math.random() - 0.5) * drift,
+        vy: Math.sin(angle) * speed + (fountain ? 0 : 0.020),
+        hue: (baseHue + i * 17 + Math.random() * 42) % 360,
+        size: (click ? 0.70 : 0.45) + Math.random() * (click ? 1.75 : 0.95),
+        spin: Math.random() * Math.PI * 2,
+        shimmer: 0.65 + Math.random() * (click ? 0.75 : 0.45),
+        state: 'fall',
+        age: 0,
+        life: 1,
+        impacted: false,
+        click
+      });
+    }
+    if (magicDust.length > 240) magicDust.splice(0, magicDust.length - 240);
+    if (magicBursts.length > 12) magicBursts.splice(0, magicBursts.length - 12);
+  }
+
+  function drawMagic(time){
+    const dt = Math.min(46, time - lastMagicTime);
+    lastMagicTime = time;
+    animateBrandGlow(time, dt);
+    magicCtx.clearRect(0, 0, innerWidth, innerHeight);
+    magicCtx.save();
+    magicCtx.globalCompositeOperation = 'lighter';
+
+    for (let i = magicBursts.length - 1; i >= 0; i--){
+      const burst = magicBursts[i];
+      burst.age += dt;
+      const t = Math.min(1, burst.age / burst.life);
+      const alpha = Math.pow(1 - t, 1.8);
+      const radius = burst.radius * (0.18 + t * 1.15);
+      magicCtx.lineWidth = 1.1 + (1 - t) * 1.8;
+      for (let j = 0; j < 3; j++){
+        magicCtx.beginPath();
+        magicCtx.arc(burst.x, burst.y, radius + j * 8, 0, Math.PI * 2);
+        magicCtx.strokeStyle = 'hsla(' + ((burst.hue + j * 76) % 360).toFixed(2) + ', 72%, 70%, ' + (alpha * (0.24 - j * 0.055)).toFixed(3) + ')';
+        magicCtx.stroke();
+      }
+      if (t >= 1) magicBursts.splice(i, 1);
+    }
+
+    const waterRect = water.getBoundingClientRect();
+    const surfaceScreenY = waterRect.top + surfaceY;
+    for (let i = magicDust.length - 1; i >= 0; i--){
+      const dust = magicDust[i];
+      dust.age += dt;
+      dust.spin += dt * 0.006 * dust.shimmer;
+      if (dust.state === 'fall'){
+        dust.vy += (dust.click ? 0.00036 : 0.00028) * dt;
+        dust.x += (dust.vx + Math.sin(dust.age * 0.010 + dust.shimmer) * (dust.click ? 0.014 : 0.009)) * dt;
+        dust.y += dust.vy * dt;
+        if (dust.y >= surfaceScreenY && dust.x >= waterRect.left - 12 && dust.x <= waterRect.right + 12){
+          if (!dust.impacted){
+            dust.impacted = true;
+            // each flake lands with a small but genuinely visible ring
+            disturbFromMagicDust(dust.x, dust.y, 0.5 + dust.size * (dust.click ? 0.45 : 0.30));
+            if (dust.size > 1.1 || Math.random() < 0.35) spawnDrops(dust.x, dust.y, 0.7);
+          }
+          if (simWater){
+            // hand the flake to the water sim: from here on it lives under the
+            // surface and gets refracted by the real waves as it sinks
+            underDust.push({
+              x: dust.x - waterRect.left,
+              y: surfaceY + 1.5,
+              vx: dust.vx * 0.25,
+              vy: 0.010 + Math.random() * 0.018,
+              hue: dust.hue,
+              size: Math.max(0.5, dust.size),
+              life: 1,
+              age: 0,
+              phase: Math.random() * Math.PI * 2
+            });
+            if (underDust.length > 160) underDust.shift();
+            magicDust.splice(i, 1);
+            continue;
+          }
+          dust.y = surfaceScreenY + Math.random() * 2;
+          dust.vx *= 0.22;
+          dust.vy = (dust.click ? 0.018 : 0.012) + Math.random() * 0.026;
+          dust.state = 'sink';
+          dust.age = 0;
+          dust.life = 1;
+        }
+      } else {
+        dust.vy += 0.000018 * dt;
+        dust.x += (dust.vx + Math.sin(dust.age * 0.017 + dust.spin) * 0.006) * dt;
+        dust.y += dust.vy * dt;
+        dust.life -= dt * 0.00038;
+        dust.size *= Math.pow(0.9992, dt);
+      }
+
+      const sinkFade = dust.state === 'sink' ? dust.life : Math.max(0, 1 - dust.age * 0.00016);
+      const alpha = Math.max(0, Math.min(dust.click ? 0.86 : 0.64, sinkFade * (dust.state === 'sink' ? (dust.click ? 0.54 : 0.38) : (dust.click ? 0.82 : 0.58))));
+      if (alpha <= 0.01 || dust.y > innerHeight + 24){
+        magicDust.splice(i, 1);
+        continue;
+      }
+      const size = Math.max(0.25, dust.size * (dust.state === 'sink' ? 0.72 : 1));
+      magicCtx.shadowBlur = dust.state === 'sink' ? (dust.click ? 10 : 6) : (dust.click ? 16 : 9);
+      magicCtx.shadowColor = 'hsla(' + dust.hue.toFixed(2) + ', 78%, 70%, ' + (alpha * 0.82).toFixed(3) + ')';
+      magicCtx.fillStyle = 'hsla(' + dust.hue.toFixed(2) + ', 82%, 72%, ' + alpha.toFixed(3) + ')';
+      magicCtx.beginPath();
+      magicCtx.ellipse(dust.x, dust.y, size * 1.45, size * 0.62, dust.spin, 0, Math.PI * 2);
+      magicCtx.fill();
+
+      if (dust.state === 'sink'){
+        magicCtx.shadowBlur = 3;
+        for (let f = 0; f < (dust.click ? 3 : 2); f++){
+          const fx = dust.x + Math.sin(dust.age * 0.012 + f * 2.1) * (3 + f * 2);
+          const fy = dust.y - f * 5 - dust.age * 0.004;
+          magicCtx.fillStyle = 'hsla(' + ((dust.hue + f * 44) % 360).toFixed(2) + ', 76%, 70%, ' + (alpha * 0.28).toFixed(3) + ')';
+          magicCtx.beginPath();
+          magicCtx.arc(fx, fy, Math.max(0.18, size * 0.36), 0, Math.PI * 2);
+          magicCtx.fill();
+        }
+      }
+    }
+    magicCtx.restore();
+    requestAnimationFrame(drawMagic);
   }
 
   function waveOffset(x, y, time){
@@ -1176,6 +1386,7 @@ body.has-custom-cursor *{ cursor: none !important; }
       precision highp float;
       uniform sampler2D uHeight;
       uniform sampler2D uRefl;
+      uniform sampler2D uDust;
       uniform vec2 uSize;
       uniform float uSurfaceY;
       uniform float uTime;
@@ -1217,8 +1428,15 @@ body.has-custom-cursor *{ cursor: none !important; }
         float dl = yCss - lineY;
         float lineA = exp(-dl * dl / 1.8) * (0.085 + clamp(abs(dlx) * 5.0, 0.0, 0.22));
 
-        vec3 col = refl.rgb * (1.0 - shade) + uLineCol * (glint + lineA);
-        float a = clamp(refl.a * (1.0 - shade * 0.5) + glint + lineA, 0.0, 1.0);
+        // sunken fairy dust — sampled with a stronger offset than the
+        // reflection so passing waves visibly bend the flakes below.
+        // Composited "over" (not additively) so it still reads on the cream theme.
+        vec4 dustC = texture(uDust, clamp(vUv + off * 2.1, 0.0, 1.0)) * inWater;
+
+        vec3 base = refl.rgb * (1.0 - shade);
+        float baseA = refl.a * (1.0 - shade * 0.5);
+        vec3 col = dustC.rgb + base * (1.0 - dustC.a) + uLineCol * (glint + lineA);
+        float a = clamp(dustC.a + baseA * (1.0 - dustC.a) + glint + lineA, 0.0, 1.0);
         outColor = vec4(col, a);
       }`;
 
@@ -1265,6 +1483,7 @@ body.has-custom-cursor *{ cursor: none !important; }
     const du = {
       height: gl.getUniformLocation(drawProg, 'uHeight'),
       refl: gl.getUniformLocation(drawProg, 'uRefl'),
+      dust: gl.getUniformLocation(drawProg, 'uDust'),
       size: gl.getUniformLocation(drawProg, 'uSize'),
       surfaceY: gl.getUniformLocation(drawProg, 'uSurfaceY'),
       time: gl.getUniformLocation(drawProg, 'uTime'),
@@ -1281,6 +1500,15 @@ body.has-custom-cursor *{ cursor: none !important; }
     const reflTex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, reflTex);
     texParams();
+
+    // underwater fairy-dust layer — drawn in 2D, refracted by the shader
+    const dustCanvas = document.createElement('canvas');
+    const dustCtx = dustCanvas.getContext('2d');
+    const dustTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, dustTex);
+    texParams();
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
+    let dustWasEmpty = true;
 
     let texA = null, texB = null, simW = 0, simH = 0;
     let reflDirty = true, lastGlow = null, lastLight = null;
@@ -1311,6 +1539,8 @@ body.has-custom-cursor *{ cursor: none !important; }
     function resize(){
       canvas.width = Math.round(waterWidth * waterDpr);
       canvas.height = Math.round(waterHeight * waterDpr);
+      dustCanvas.width = Math.max(1, Math.round(waterWidth));
+      dustCanvas.height = Math.max(1, Math.round(waterHeight));
       simW = Math.max(96, Math.min(384, Math.round(waterWidth / 3)));
       simH = Math.max(72, Math.min(288, Math.round(Math.max(1, waterHeight - surfaceY) / 2)));
       dropSimTex(texA);
@@ -1329,15 +1559,83 @@ body.has-custom-cursor *{ cursor: none !important; }
       gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
     }
 
-    function disturb(lx, ly, force){
+    function disturb(lx, ly, force, radiusScale = 1){
       const span = Math.max(1, waterHeight - surfaceY);
       const vs = (ly - surfaceY) / span;
       if (vs < -0.05 || vs > 1.08) return;
       const vp = Math.pow(Math.min(1, Math.max(vs, 0.004)), 1 / SIM_GAMMA);
       const f = Math.min(3, force);
-      pending.push(lx / waterWidth, vp, 3.0 + f * 1.8, f * 0.20);
+      pending.push(lx / waterWidth, vp, (3.0 + f * 1.8) * radiusScale, f * 0.20);
       if (pending.length > 40) pending = pending.slice(-40);
       simEnergy = Math.min(3, simEnergy + force * 0.35);
+    }
+
+    function uploadDust(){
+      gl.bindTexture(gl.TEXTURE_2D, dustTex);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, dustCanvas);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    }
+
+    function updateUnderDust(dt){
+      if (!underDust.length){
+        if (!dustWasEmpty){
+          dustCtx.clearRect(0, 0, dustCanvas.width, dustCanvas.height);
+          uploadDust();
+          dustWasEmpty = true;
+        }
+        return;
+      }
+      dustWasEmpty = false;
+      dustCtx.clearRect(0, 0, dustCanvas.width, dustCanvas.height);
+      dustCtx.globalCompositeOperation = 'lighter';
+      const light = isLight();
+      const span = Math.max(1, waterHeight - surfaceY);
+      for (let i = underDust.length - 1; i >= 0; i--){
+        const d = underDust[i];
+        d.age += dt;
+        d.x += (d.vx + Math.sin(d.age * 0.0035 + d.phase) * 0.007) * dt;
+        d.y += d.vy * dt;
+        d.vy = Math.max(0.006, d.vy * Math.pow(0.9995, dt));  // water drag
+        d.life -= dt * 0.00024;
+        // flakes shed tinier fragments as they sink
+        if (d.size > 0.7 && underDust.length < 150 && Math.random() < dt * 0.0011){
+          d.size *= 0.72;
+          underDust.push({
+            x: d.x + (Math.random() - 0.5) * 3,
+            y: d.y + Math.random() * 2,
+            vx: d.vx + (Math.random() - 0.5) * 0.012,
+            vy: d.vy * (0.5 + Math.random() * 0.4),
+            hue: (d.hue + 24 + Math.random() * 40) % 360,
+            size: d.size * (0.55 + Math.random() * 0.3),
+            life: Math.min(1, d.life + 0.1),
+            age: 0,
+            phase: Math.random() * Math.PI * 2
+          });
+        }
+        const depth = clamp01((d.y - surfaceY) / span);
+        const twinkle = 0.72 + 0.28 * Math.sin(d.age * 0.011 + d.phase);
+        const alpha = Math.max(0, d.life) * (1 - depth * 0.55) * twinkle * 0.9;
+        if (alpha <= 0.015 || d.y > waterHeight + 6){
+          underDust.splice(i, 1);
+          continue;
+        }
+        const size = Math.max(0.22, d.size * (1 - depth * 0.3));
+        // cream theme needs deeper, more saturated flecks to read against the page
+        const sat = (light ? 78 : 82) - depth * (light ? 18 : 34);
+        const lig = light ? 50 - depth * 6 : 72 - depth * 10;
+        dustCtx.shadowBlur = 5 + (1 - depth) * 4;
+        dustCtx.shadowColor = 'hsla(' + d.hue.toFixed(1) + ', ' + sat.toFixed(1) + '%, ' + lig.toFixed(1) + '%, ' + (alpha * 0.8).toFixed(3) + ')';
+        dustCtx.fillStyle = 'hsla(' + d.hue.toFixed(1) + ', ' + sat.toFixed(1) + '%, ' + lig.toFixed(1) + '%, ' + alpha.toFixed(3) + ')';
+        dustCtx.beginPath();
+        dustCtx.ellipse(d.x, d.y, size * 1.4, size * 0.6, d.phase + d.age * 0.002, 0, Math.PI * 2);
+        dustCtx.fill();
+      }
+      dustCtx.shadowBlur = 0;
+      dustCtx.globalCompositeOperation = 'source-over';
+      uploadDust();
     }
 
     function step(applyDrops){
@@ -1368,8 +1666,11 @@ body.has-custom-cursor *{ cursor: none !important; }
       gl.bindTexture(gl.TEXTURE_2D, texA.t);
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, reflTex);
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, dustTex);
       gl.uniform1i(du.height, 0);
       gl.uniform1i(du.refl, 1);
+      gl.uniform1i(du.dust, 2);
       gl.uniform2f(du.size, waterWidth, waterHeight);
       gl.uniform1f(du.surfaceY, surfaceY);
       gl.uniform1f(du.time, time);
@@ -1420,6 +1721,7 @@ body.has-custom-cursor *{ cursor: none !important; }
       }
       if (!first) pending.length = 0;
 
+      updateUnderDust(dt);
       render(time);
       drawSimOverlay(time, dt);
       requestAnimationFrame(frame);
@@ -1455,6 +1757,7 @@ body.has-custom-cursor *{ cursor: none !important; }
 
   simWater = initSimWater();
   resizeWater();
+  requestAnimationFrame(drawMagic);
   if (simWater){
     logoImg.addEventListener('load', () => simWater.markDirty(), { once: true });
     if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => simWater.markDirty());
