@@ -124,6 +124,11 @@ body.has-custom-cursor *{ cursor: none !important; }
   initial-value: 0deg;
   inherits: false;
 }
+@property --lit-strength {
+  syntax: '<number>';
+  initial-value: 0;
+  inherits: false;
+}
 [data-cta]{
   position: relative;
   display: inline-block;
@@ -204,17 +209,11 @@ body.has-custom-cursor *{ cursor: none !important; }
 .split .ch{
   display: inline-block;
   color: inherit;
-  transition: color .34s ease, text-shadow .34s ease;
-  transition-delay: calc(var(--i, 0) * 24ms);
+  transition: color .18s ease, text-shadow .18s ease;
 }
 .split .ch.sp{ width: 0.28em; }
-.split:hover .ch,
-.split.is-focus .ch,
-.split.is-lit .ch,
-[data-cta]:hover .split .ch,
-[data-cta].is-focus .split .ch{
-  color: hsl(calc(15 + var(--i, 0) * 28), 55%, 78%);
-  text-shadow: 0 0 10px hsla(calc(15 + var(--i, 0) * 28), 60%, 70%, 0.35);
+.split.is-local-lit .ch{
+  transition-duration: .12s;
 }
 
 /* ── App layout ─────────────────────────── */
@@ -357,24 +356,27 @@ body.has-custom-cursor *{ cursor: none !important; }
 }
 /* logo mark — coloured via mask so it can go rainbow on hover/click */
 .hero .mark{
+  --lit-x: 50%;
+  --lit-y: 50%;
+  --lit-strength: 0;
   height: clamp(96px, 17vh, 168px);
   aspect-ratio: 467 / 1277;
   margin-bottom: clamp(22px, 3.2vh, 38px);
-  background: var(--bone);
+  background:
+    radial-gradient(circle at var(--lit-x) var(--lit-y),
+      hsla(15, 75%, 62%, calc(var(--lit-strength) * 0.95)) 0%,
+      hsla(48, 78%, 62%, calc(var(--lit-strength) * 0.9)) 13%,
+      hsla(128, 52%, 58%, calc(var(--lit-strength) * 0.82)) 25%,
+      hsla(192, 64%, 60%, calc(var(--lit-strength) * 0.72)) 38%,
+      hsla(262, 54%, 66%, calc(var(--lit-strength) * 0.55)) 52%,
+      hsla(322, 64%, 66%, calc(var(--lit-strength) * 0.28)) 66%,
+      transparent 78%),
+    var(--bone);
   -webkit-mask: url('assets/Logo.svg') no-repeat center / contain;
   mask: url('assets/Logo.svg') no-repeat center / contain;
   pointer-events: auto;
-  transition: background-color .4s ease;
+  transition: --lit-strength .22s ease;
 }
-.hero .mark:hover,
-.hero .mark.is-lit{
-  background: linear-gradient(180deg,
-    hsl(15, 75%, 62%), hsl(48, 78%, 62%), hsl(128, 52%, 58%),
-    hsl(192, 64%, 60%), hsl(262, 54%, 66%), hsl(322, 64%, 66%), hsl(15, 75%, 62%));
-  background-size: 100% 230%;
-  animation: mark-flow 3.2s linear infinite;
-}
-@keyframes mark-flow{ from{ background-position: 0 0; } to{ background-position: 0 230%; } }
 
 .hero h1{
   font-family: "Playfair Display", Georgia, serif;
@@ -407,6 +409,15 @@ body.has-custom-cursor *{ cursor: none !important; }
   pointer-events: none;
   opacity: 0.92;
   filter: saturate(0.92);
+}
+.magic-plane{
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 5;
+  pointer-events: none;
+  mix-blend-mode: screen;
 }
 
 /* bottom anchors */
@@ -460,6 +471,7 @@ body.has-custom-cursor *{ cursor: none !important; }
 
   <canvas class="water-plane" id="waterSim" aria-hidden="true"></canvas>
   <canvas class="water-plane" id="waterPlane" aria-hidden="true"></canvas>
+  <canvas class="magic-plane" id="magicPlane" aria-hidden="true"></canvas>
 
   <main class="hero">
     <div class="mark" data-lit role="img" aria-label="Mirumora Studio mark"></div>
@@ -609,9 +621,115 @@ body.has-custom-cursor *{ cursor: none !important; }
   }
   document.querySelectorAll('[data-split]').forEach(splitElement);
 
-  /* Rainbow lock — click the logo / wordmark to hold the colour wash */
+  /* Local rainbow source — hover follows the cursor; click pins that point. */
+  const brandGlow = {
+    active: null,
+    pinned: null,
+    signature: ''
+  };
+
+  function markReflectionDirty(){
+    if (simWater) simWater.markDirty();
+  }
+
+  function clamp01(n){
+    return Math.max(0, Math.min(1, n));
+  }
+
+  function localHue(distance){
+    return (15 + distance * 1.85) % 360;
+  }
+
+  function setMarkGlow(el, x, y, strength){
+    const rect = el.getBoundingClientRect();
+    const px = clamp01((x - rect.left) / Math.max(1, rect.width)) * 100;
+    const py = clamp01((y - rect.top) / Math.max(1, rect.height)) * 100;
+    el.style.setProperty('--lit-x', px.toFixed(2) + '%');
+    el.style.setProperty('--lit-y', py.toFixed(2) + '%');
+    el.style.setProperty('--lit-strength', strength.toFixed(3));
+  }
+
+  function setSplitGlow(el, x, y, strength){
+    const rect = el.getBoundingClientRect();
+    const radius = Math.max(86, Math.min(170, rect.width * 0.32));
+    let any = false;
+    el.querySelectorAll('.ch:not(.sp)').forEach(ch => {
+      const chRect = ch.getBoundingClientRect();
+      const dx = chRect.left + chRect.width / 2 - x;
+      const dy = chRect.top + chRect.height / 2 - y;
+      const d = Math.hypot(dx, dy);
+      const alpha = clamp01(1 - d / radius) * strength;
+      const hue = localHue(d);
+      ch.style.setProperty('--lit-alpha', alpha.toFixed(3));
+      ch.style.setProperty('--lit-hue', hue.toFixed(2));
+      if (alpha > 0.02){
+        ch.style.color = 'hsl(' + hue.toFixed(2) + ', 58%, 72%)';
+        ch.style.textShadow = '0 0 ' + (2 + alpha * 14).toFixed(2) + 'px hsla(' + hue.toFixed(2) + ', 66%, 70%, ' + (alpha * 0.48).toFixed(3) + ')';
+        any = true;
+      } else {
+        ch.style.color = '';
+        ch.style.textShadow = '';
+      }
+    });
+    el.classList.toggle('is-local-lit', any);
+  }
+
+  function clearLocalGlow(el){
+    if (el.classList.contains('mark')){
+      el.style.setProperty('--lit-strength', '0');
+    } else {
+      el.querySelectorAll('.ch').forEach(ch => {
+        ch.style.setProperty('--lit-alpha', '0');
+        ch.style.color = '';
+        ch.style.textShadow = '';
+      });
+      el.classList.remove('is-local-lit');
+    }
+  }
+
+  function setBrandGlow(el, x, y, strength = 1, pinned = false){
+    if (el.classList.contains('mark')) setMarkGlow(el, x, y, strength);
+    else setSplitGlow(el, x, y, strength);
+    brandGlow.active = { el, x, y, strength, pinned };
+    brandGlow.signature = el.className + ':' + Math.round(x) + ':' + Math.round(y) + ':' + strength.toFixed(2) + ':' + (pinned ? '1' : '0');
+    markReflectionDirty();
+  }
+
+  function clearBrandGlow(el){
+    if (brandGlow.pinned && brandGlow.pinned.el === el) return;
+    clearLocalGlow(el);
+    if (brandGlow.active && brandGlow.active.el === el){
+      brandGlow.active = brandGlow.pinned;
+      if (brandGlow.pinned) setBrandGlow(brandGlow.pinned.el, brandGlow.pinned.x, brandGlow.pinned.y, 1, true);
+      else markReflectionDirty();
+    }
+  }
+
   document.querySelectorAll('[data-lit]').forEach(el => {
-    el.addEventListener('click', () => el.classList.toggle('is-lit'));
+    el.addEventListener('pointerenter', e => {
+      if (brandGlow.pinned) return;
+      setBrandGlow(el, e.clientX, e.clientY);
+    });
+    el.addEventListener('pointermove', e => {
+      if (brandGlow.pinned) return;
+      setBrandGlow(el, e.clientX, e.clientY);
+    });
+    el.addEventListener('pointerleave', () => {
+      if (!brandGlow.pinned) clearBrandGlow(el);
+    });
+    el.addEventListener('click', e => {
+      spawnBrandMagic(el, e.clientX, e.clientY);
+      if (brandGlow.pinned && brandGlow.pinned.el === el){
+        brandGlow.pinned = null;
+        clearLocalGlow(el);
+        brandGlow.active = null;
+        markReflectionDirty();
+        return;
+      }
+      if (brandGlow.pinned && brandGlow.pinned.el !== el) clearLocalGlow(brandGlow.pinned.el);
+      brandGlow.pinned = { el, x: e.clientX, y: e.clientY, strength: 1, pinned: true };
+      setBrandGlow(el, e.clientX, e.clientY, 1, true);
+    });
   });
 
   /* Click intercept — let the color animation play before navigation */
@@ -664,12 +782,15 @@ body.has-custom-cursor *{ cursor: none !important; }
   const mark = document.querySelector('.hero .mark');
   const title = document.querySelector('.hero h1');
   const studio = document.querySelector('.hero .studio');
+  const magic = document.getElementById('magicPlane');
+  const magicCtx = magic.getContext('2d', { alpha: true });
   const logoImg = new Image();
   logoImg.src = 'assets/Logo.svg';
 
   let waterWidth = 0;
   let waterHeight = 0;
   let waterDpr = 1;
+  let magicDpr = 1;
   let surfaceY = 0;
   let pointerX = innerWidth / 2;
   let pointerY = innerHeight / 2;
@@ -679,6 +800,8 @@ body.has-custom-cursor *{ cursor: none !important; }
   let pointerInsideWater = false;
   const ripples = [];
   const drops = [];
+  const magicDust = [];
+  const magicBursts = [];
   let simWater = null;   // WebGL2 ripple physics — null means the legacy 2D path runs
   let simEnergy = 0;     // recent-disturbance energy, drives the surface glow pulse
 
@@ -697,6 +820,10 @@ body.has-custom-cursor *{ cursor: none !important; }
     water.width = Math.round(waterWidth * waterDpr);
     water.height = Math.round(waterHeight * waterDpr);
     waterCtx.setTransform(waterDpr, 0, 0, waterDpr, 0, 0);
+    magicDpr = Math.min(devicePixelRatio || 1, 2);
+    magic.width = Math.round(innerWidth * magicDpr);
+    magic.height = Math.round(innerHeight * magicDpr);
+    magicCtx.setTransform(magicDpr, 0, 0, magicDpr, 0, 0);
     reflectionCanvas.width = Math.round(waterWidth * waterDpr);
     reflectionCanvas.height = Math.round(waterHeight * waterDpr);
     reflectionCtx.setTransform(waterDpr, 0, 0, waterDpr, 0, 0);
@@ -707,15 +834,22 @@ body.has-custom-cursor *{ cursor: none !important; }
     if (simWater) simWater.resize();
   }
 
-  function brandIsLit(){
-    return document.querySelector('[data-lit].is-lit, [data-lit]:hover') !== null;
+  function brandGlowState(){
+    return brandGlow.pinned || brandGlow.active;
+  }
+
+  function brandGlowSignature(){
+    const glow = brandGlowState();
+    if (!glow) return 'none';
+    return (glow.el === mark ? 'mark' : glow.el === title ? 'title' : 'studio') +
+      ':' + Math.round(glow.x) + ':' + Math.round(glow.y) + ':' + glow.strength.toFixed(2);
   }
 
   function colorForCssVar(name){
     return getComputedStyle(root).getPropertyValue(name).trim();
   }
 
-  function fillLogo(ctx, x, y, w, h, lit){
+  function fillLogo(ctx, x, y, w, h, glow){
     if (!(logoImg.complete && logoImg.naturalWidth) || w <= 0 || h <= 0) return;
     // Recolor the logo opaquely on its own scratch canvas first, then composite
     // it once into ctx — otherwise the source-in fill and the caller's reflection
@@ -727,21 +861,59 @@ body.has-custom-cursor *{ cursor: none !important; }
     logoScratchCtx.clearRect(0, 0, sw, sh);
     logoScratchCtx.drawImage(logoImg, 0, 0, sw, sh);
     logoScratchCtx.globalCompositeOperation = 'source-in';
-    if (lit){
-      const grad = logoScratchCtx.createLinearGradient(0, 0, 0, sh);
-      grad.addColorStop(0.00, 'hsl(15, 75%, 62%)');
-      grad.addColorStop(0.18, 'hsl(48, 78%, 62%)');
-      grad.addColorStop(0.36, 'hsl(128, 52%, 58%)');
-      grad.addColorStop(0.55, 'hsl(192, 64%, 60%)');
-      grad.addColorStop(0.74, 'hsl(262, 54%, 66%)');
-      grad.addColorStop(1.00, 'hsl(322, 64%, 66%)');
-      logoScratchCtx.fillStyle = grad;
-    } else {
-      logoScratchCtx.fillStyle = colorForCssVar('--bone');
-    }
+    logoScratchCtx.fillStyle = colorForCssVar('--bone');
     logoScratchCtx.fillRect(0, 0, sw, sh);
+    if (glow && glow.el === mark){
+      logoScratchCtx.globalCompositeOperation = 'source-atop';
+      const markRect = mark.getBoundingClientRect();
+      const gx = clamp01((glow.x - markRect.left) / Math.max(1, markRect.width)) * sw;
+      const gy = clamp01((glow.y - markRect.top) / Math.max(1, markRect.height)) * sh;
+      const r = Math.max(sw, sh) * 0.44;
+      const grad = logoScratchCtx.createRadialGradient(gx, gy, 0, gx, gy, r);
+      grad.addColorStop(0.00, 'hsla(15, 75%, 62%, 0.96)');
+      grad.addColorStop(0.16, 'hsla(48, 78%, 62%, 0.92)');
+      grad.addColorStop(0.30, 'hsla(128, 52%, 58%, 0.84)');
+      grad.addColorStop(0.46, 'hsla(192, 64%, 60%, 0.72)');
+      grad.addColorStop(0.62, 'hsla(262, 54%, 66%, 0.54)');
+      grad.addColorStop(0.78, 'hsla(322, 64%, 66%, 0.28)');
+      grad.addColorStop(1.00, 'hsla(322, 64%, 66%, 0)');
+      logoScratchCtx.fillStyle = grad;
+      logoScratchCtx.fillRect(0, 0, sw, sh);
+    }
     logoScratchCtx.globalCompositeOperation = 'source-over';
     ctx.drawImage(logoScratch, x, y, w, h);
+  }
+
+  function drawReflectedSplit(ctx, el, waterRect, baseColor, baseAlpha, glow){
+    const style = getComputedStyle(el);
+    const elRect = el.getBoundingClientRect();
+    const radius = Math.max(86, Math.min(170, elRect.width * 0.32));
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.font = style.fontWeight + ' ' + style.fontSize + ' ' + style.fontFamily;
+    el.querySelectorAll('.ch:not(.sp)').forEach(ch => {
+      const chRect = ch.getBoundingClientRect();
+      const x = chRect.left - waterRect.left;
+      const y = chRect.top - waterRect.top;
+      ctx.globalAlpha = baseAlpha;
+      ctx.fillStyle = baseColor;
+      ctx.fillText(ch.textContent, x, y);
+      if (glow && glow.el === el){
+        const dx = chRect.left + chRect.width / 2 - glow.x;
+        const dy = chRect.top + chRect.height / 2 - glow.y;
+        const d = Math.hypot(dx, dy);
+        const alpha = clamp01(1 - d / radius) * glow.strength;
+        if (alpha > 0.02){
+          ctx.globalAlpha = baseAlpha * (1 + alpha * 1.8);
+          ctx.fillStyle = 'hsl(' + localHue(d).toFixed(2) + ', 60%, 70%)';
+          ctx.shadowColor = 'hsla(' + localHue(d).toFixed(2) + ', 68%, 70%, ' + (alpha * 0.34).toFixed(3) + ')';
+          ctx.shadowBlur = 6 + alpha * 10;
+          ctx.fillText(ch.textContent, x, y);
+          ctx.shadowBlur = 0;
+        }
+      }
+    });
+    ctx.globalAlpha = 1;
   }
 
   function drawReflectionSource(){
@@ -750,7 +922,7 @@ body.has-custom-cursor *{ cursor: none !important; }
     const markRect = mark.getBoundingClientRect();
     const titleRect = title.getBoundingClientRect();
     const studioRect = studio.getBoundingClientRect();
-    const lit = brandIsLit();
+    const glow = brandGlowState();
 
     // Mirror the brand about the waterline (surfaceY) and foreshorten it, the way
     // a real reflection compresses with distance. This keeps every reflection
@@ -771,34 +943,11 @@ body.has-custom-cursor *{ cursor: none !important; }
       markRect.top - waterRect.top,
       markRect.width,
       markRect.height,
-      lit
+      glow
     );
 
-    reflectionCtx.globalAlpha = isLight() ? 0.16 : 0.20;
-    const titleStyle = getComputedStyle(title);
-    reflectionCtx.textAlign = 'center';
-    reflectionCtx.textBaseline = 'top';
-    reflectionCtx.font = titleStyle.fontWeight + ' ' + titleStyle.fontSize + ' ' + titleStyle.fontFamily;
-    if (lit){
-      const grad = reflectionCtx.createLinearGradient(0, titleRect.top - waterRect.top, 0, titleRect.bottom - waterRect.top);
-      grad.addColorStop(0.00, 'hsl(15, 75%, 62%)');
-      grad.addColorStop(0.22, 'hsl(48, 78%, 62%)');
-      grad.addColorStop(0.44, 'hsl(128, 52%, 58%)');
-      grad.addColorStop(0.66, 'hsl(192, 64%, 60%)');
-      grad.addColorStop(0.84, 'hsl(262, 54%, 66%)');
-      grad.addColorStop(1.00, 'hsl(322, 64%, 66%)');
-      reflectionCtx.fillStyle = grad;
-    } else {
-      reflectionCtx.fillStyle = colorForCssVar('--bone');
-    }
-    reflectionCtx.fillText('Mirumora', titleRect.left - waterRect.left + titleRect.width / 2, titleRect.top - waterRect.top);
-
-    const studioStyle = getComputedStyle(studio);
-    reflectionCtx.font = studioStyle.fontWeight + ' ' + studioStyle.fontSize + ' ' + studioStyle.fontFamily;
-    reflectionCtx.letterSpacing = studioStyle.letterSpacing;
-    reflectionCtx.fillStyle = lit ? reflectionCtx.fillStyle : colorForCssVar('--bone-dim');
-    reflectionCtx.globalAlpha = isLight() ? 0.13 : 0.16;
-    reflectionCtx.fillText('STUDIO', studioRect.left - waterRect.left + studioRect.width / 2, studioRect.top - waterRect.top);
+    drawReflectedSplit(reflectionCtx, title, waterRect, colorForCssVar('--bone'), isLight() ? 0.16 : 0.20, glow);
+    drawReflectedSplit(reflectionCtx, studio, waterRect, colorForCssVar('--bone-dim'), isLight() ? 0.13 : 0.16, glow);
     reflectionCtx.restore();
 
     reflectionCtx.save();
@@ -1134,7 +1283,7 @@ body.has-custom-cursor *{ cursor: none !important; }
     texParams();
 
     let texA = null, texB = null, simW = 0, simH = 0;
-    let reflDirty = true, lastLit = null, lastLight = null;
+    let reflDirty = true, lastGlow = null, lastLight = null;
     let pending = [];
     let accum = 0;
     let prevTime = performance.now();
@@ -1250,9 +1399,9 @@ body.has-custom-cursor *{ cursor: none !important; }
       prevTime = time;
       if (!simW || !texA || !texB){ requestAnimationFrame(frame); return; }
 
-      const lit = brandIsLit(), light = isLight();
-      if (lit !== lastLit || light !== lastLight){
-        lastLit = lit;
+      const glow = brandGlowSignature(), light = isLight();
+      if (glow !== lastGlow || light !== lastLight){
+        lastGlow = glow;
         lastLight = light;
         reflDirty = true;
       }
