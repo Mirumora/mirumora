@@ -458,6 +458,7 @@ body.has-custom-cursor *{ cursor: none !important; }
     </div>
   </nav>
 
+  <canvas class="water-plane" id="waterSim" aria-hidden="true"></canvas>
   <canvas class="water-plane" id="waterPlane" aria-hidden="true"></canvas>
 
   <main class="hero">
@@ -678,6 +679,8 @@ body.has-custom-cursor *{ cursor: none !important; }
   let pointerInsideWater = false;
   const ripples = [];
   const drops = [];
+  let simWater = null;   // WebGL2 ripple physics — null means the legacy 2D path runs
+  let simEnergy = 0;     // recent-disturbance energy, drives the surface glow pulse
 
   const reflectionCanvas = document.createElement('canvas');
   const reflectionCtx = reflectionCanvas.getContext('2d');
@@ -701,6 +704,7 @@ body.has-custom-cursor *{ cursor: none !important; }
     sliceCanvas.height = Math.round(waterHeight * waterDpr);
     sliceCtx.setTransform(waterDpr, 0, 0, waterDpr, 0, 0);
     surfaceY = Math.max(52, Math.min(waterHeight * 0.44, waterHeight - 240));
+    if (simWater) simWater.resize();
   }
 
   function brandIsLit(){
@@ -821,11 +825,9 @@ body.has-custom-cursor *{ cursor: none !important; }
     if (ripples.length > 36) ripples.shift();
   }
 
-  function disturbFromPointer(x, y, force){
+  function spawnDrops(x, y, force){
     const waterRect = water.getBoundingClientRect();
     const localY = y - waterRect.top;
-    if (localY < surfaceY - 18 || localY > waterHeight + 12) return;
-    addRipple(x, y, force);
     for (let i = 0; i < Math.min(5, Math.ceil(force * 2)); i++){
       drops.push({
         x: x - waterRect.left + (Math.random() - 0.5) * 16,
@@ -836,6 +838,19 @@ body.has-custom-cursor *{ cursor: none !important; }
       });
     }
     if (drops.length > 50) drops.splice(0, drops.length - 50);
+  }
+
+  function disturbFromPointer(x, y, force){
+    const waterRect = water.getBoundingClientRect();
+    const localY = y - waterRect.top;
+    if (localY < surfaceY - 18 || localY > waterHeight + 12) return;
+    if (simWater){
+      simWater.disturb(x - waterRect.left, localY, force);
+      if (force >= 1) spawnDrops(x, y, force);
+      return;
+    }
+    addRipple(x, y, force);
+    spawnDrops(x, y, force);
   }
 
   function waveOffset(x, y, time){
@@ -942,6 +957,12 @@ body.has-custom-cursor *{ cursor: none !important; }
       if (ripple.life <= 0) ripples.splice(i, 1);
     }
 
+    drawDrops(dt, line);
+
+    requestAnimationFrame(drawWater);
+  }
+
+  function drawDrops(dt, line){
     for (let i = drops.length - 1; i >= 0; i--){
       const drop = drops[i];
       drop.x += drop.vx * dt;
@@ -954,8 +975,308 @@ body.has-custom-cursor *{ cursor: none !important; }
       waterCtx.fill();
       if (drop.life <= 0) drops.splice(i, 1);
     }
+  }
 
-    requestAnimationFrame(drawWater);
+  // ── Real ripple physics (WebGL2 height field) ─────────────
+  // Every touch presses the surface down at that spot; the wave equation then
+  // propagates it outward, ripples interfere and bounce off the edges, and the
+  // reflection is refracted per-pixel by the local surface slope — instead of
+  // the old whole-row wobble. The sim runs in "plane space": screen y is
+  // remapped so ripples foreshorten toward the waterline like a receding pond.
+  const SIM_GAMMA = 1.8;
+
+  function initSimWater(){
+    const canvas = document.getElementById('waterSim');
+    const gl = canvas.getContext('webgl2', { alpha: true, antialias: false, premultipliedAlpha: true });
+    if (!gl) return null;
+    if (!gl.getExtension('EXT_color_buffer_float') && !gl.getExtension('EXT_color_buffer_half_float')) return null;
+
+    const VS_SRC = '#version 300 es\n' +
+      'layout(location=0) in vec2 aPos;\n' +
+      'out vec2 vUv;\n' +
+      'void main(){ vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }';
+
+    const STEP_FS = '#version 300 es\n' + `
+      precision highp float;
+      uniform sampler2D uPrev;
+      uniform vec2 uTexel;
+      uniform vec2 uSimSize;
+      uniform int uDropCount;
+      uniform vec4 uDrops[10];
+      in vec2 vUv;
+      out vec4 outColor;
+      void main(){
+        vec2 c = texture(uPrev, vUv).rg;
+        float hl = texture(uPrev, vUv - vec2(uTexel.x, 0.0)).r;
+        float hr = texture(uPrev, vUv + vec2(uTexel.x, 0.0)).r;
+        float hu = texture(uPrev, vUv - vec2(0.0, uTexel.y)).r;
+        float hd = texture(uPrev, vUv + vec2(0.0, uTexel.y)).r;
+        float avg = (hl + hr + hu + hd) * 0.25;
+        float vel = (c.g + (avg - c.r) * 0.45) * 0.994;
+        float h = (c.r + vel) * 0.9995;
+        for (int i = 0; i < 10; i++){
+          if (i >= uDropCount) break;
+          vec4 d = uDrops[i];
+          vec2 p = (vUv - d.xy) * uSimSize;
+          h -= d.w * exp(-dot(p, p) / (d.z * d.z));
+        }
+        outColor = vec4(clamp(h, -3.0, 3.0), vel, 0.0, 1.0);
+      }`;
+
+    const DRAW_FS = '#version 300 es\n' + `
+      precision highp float;
+      uniform sampler2D uHeight;
+      uniform sampler2D uRefl;
+      uniform vec2 uSize;
+      uniform float uSurfaceY;
+      uniform float uTime;
+      uniform vec3 uLineCol;
+      in vec2 vUv;
+      out vec4 outColor;
+      const float GAMMA = ${SIM_GAMMA.toFixed(2)};
+      void main(){
+        float yCss = (1.0 - vUv.y) * uSize.y;
+        float span = max(1.0, uSize.y - uSurfaceY);
+        float vs = (yCss - uSurfaceY) / span;
+        if (vs < -0.03){ outColor = vec4(0.0); return; }
+        float vsc = clamp(vs, 0.0, 1.0);
+        float inWater = smoothstep(0.0, 0.012, vs);
+        vec2 suv = vec2(vUv.x, pow(max(vsc, 0.0001), 1.0 / GAMMA));
+        vec2 ts = vec2(textureSize(uHeight, 0));
+        vec2 e = 1.5 / ts;
+        float dhx = texture(uHeight, suv + vec2(e.x, 0.0)).r - texture(uHeight, suv - vec2(e.x, 0.0)).r;
+        float dhy = texture(uHeight, suv + vec2(0.0, e.y)).r - texture(uHeight, suv - vec2(0.0, e.y)).r;
+
+        float idle = (sin(yCss * 0.045 + uTime * 0.0007) * 0.6
+                    + sin(yCss * 0.110 + uTime * 0.0013) * 0.3
+                    + sin(yCss * 0.021 - uTime * 0.0005) * 0.5) * vsc;
+
+        float near = mix(0.40, 1.0, vsc);
+        vec2 off = vec2(dhx * 120.0 * near + idle, dhy * 210.0 * near) / uSize;
+        vec4 refl = texture(uRefl, clamp(vUv + off, 0.0, 1.0));
+
+        float glint = pow(clamp(dhy * 10.0, 0.0, 1.0), 1.4) * 0.42 * mix(0.45, 1.0, vsc) * inWater;
+        float shade = pow(clamp(-dhy * 10.0, 0.0, 1.0), 1.4) * 0.30 * inWater;
+
+        float hline = texture(uHeight, vec2(vUv.x, 1.5 / ts.y)).r;
+        float dlx = texture(uHeight, vec2(vUv.x + e.x, 1.5 / ts.y)).r
+                  - texture(uHeight, vec2(vUv.x - e.x, 1.5 / ts.y)).r;
+        float lineY = uSurfaceY
+                    + sin(vUv.x * uSize.x * 0.013 + uTime * 0.0009) * 1.2
+                    + sin(vUv.x * uSize.x * 0.031 - uTime * 0.0013) * 0.6
+                    + hline * 22.0;
+        float dl = yCss - lineY;
+        float lineA = exp(-dl * dl / 1.8) * (0.085 + clamp(abs(dlx) * 5.0, 0.0, 0.22));
+
+        vec3 col = refl.rgb * (1.0 - shade) + uLineCol * (glint + lineA);
+        float a = clamp(refl.a * (1.0 - shade * 0.5) + glint + lineA, 0.0, 1.0);
+        outColor = vec4(col, a);
+      }`;
+
+    function shader(type, src){
+      const s = gl.createShader(type);
+      gl.shaderSource(s, src);
+      gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)){
+        console.warn('water shader: ' + gl.getShaderInfoLog(s));
+        return null;
+      }
+      return s;
+    }
+    function program(fsSrc){
+      const vs = shader(gl.VERTEX_SHADER, VS_SRC);
+      const fs = shader(gl.FRAGMENT_SHADER, fsSrc);
+      if (!vs || !fs) return null;
+      const p = gl.createProgram();
+      gl.attachShader(p, vs);
+      gl.attachShader(p, fs);
+      gl.linkProgram(p);
+      return gl.getProgramParameter(p, gl.LINK_STATUS) ? p : null;
+    }
+
+    const stepProg = program(STEP_FS);
+    const drawProg = program(DRAW_FS);
+    if (!stepProg || !drawProg) return null;
+
+    const vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+    const su = {
+      prev: gl.getUniformLocation(stepProg, 'uPrev'),
+      texel: gl.getUniformLocation(stepProg, 'uTexel'),
+      simSize: gl.getUniformLocation(stepProg, 'uSimSize'),
+      dropCount: gl.getUniformLocation(stepProg, 'uDropCount'),
+      drops: gl.getUniformLocation(stepProg, 'uDrops[0]')
+    };
+    const du = {
+      height: gl.getUniformLocation(drawProg, 'uHeight'),
+      refl: gl.getUniformLocation(drawProg, 'uRefl'),
+      size: gl.getUniformLocation(drawProg, 'uSize'),
+      surfaceY: gl.getUniformLocation(drawProg, 'uSurfaceY'),
+      time: gl.getUniformLocation(drawProg, 'uTime'),
+      lineCol: gl.getUniformLocation(drawProg, 'uLineCol')
+    };
+
+    function texParams(){
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    }
+
+    const reflTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, reflTex);
+    texParams();
+
+    let texA = null, texB = null, simW = 0, simH = 0;
+    let reflDirty = true, lastLit = null, lastLight = null;
+    let pending = [];
+    let accum = 0;
+    let prevTime = performance.now();
+
+    function makeSimTex(w, h){
+      const t = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA16F, w, h);
+      texParams();
+      const f = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) return null;
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      return { t, f };
+    }
+
+    function dropSimTex(pair){
+      if (!pair) return;
+      gl.deleteTexture(pair.t);
+      gl.deleteFramebuffer(pair.f);
+    }
+
+    function resize(){
+      canvas.width = Math.round(waterWidth * waterDpr);
+      canvas.height = Math.round(waterHeight * waterDpr);
+      simW = Math.max(96, Math.min(384, Math.round(waterWidth / 3)));
+      simH = Math.max(72, Math.min(288, Math.round(Math.max(1, waterHeight - surfaceY) / 2)));
+      dropSimTex(texA);
+      dropSimTex(texB);
+      texA = makeSimTex(simW, simH);
+      texB = makeSimTex(simW, simH);
+      reflDirty = true;
+    }
+
+    function uploadReflection(){
+      gl.bindTexture(gl.TEXTURE_2D, reflTex);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, reflectionCanvas);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    }
+
+    function disturb(lx, ly, force){
+      const span = Math.max(1, waterHeight - surfaceY);
+      const vs = (ly - surfaceY) / span;
+      if (vs < -0.05 || vs > 1.08) return;
+      const vp = Math.pow(Math.min(1, Math.max(vs, 0.004)), 1 / SIM_GAMMA);
+      const f = Math.min(3, force);
+      pending.push(lx / waterWidth, vp, 3.0 + f * 1.8, f * 0.20);
+      if (pending.length > 40) pending = pending.slice(-40);
+      simEnergy = Math.min(3, simEnergy + force * 0.35);
+    }
+
+    function step(applyDrops){
+      gl.useProgram(stepProg);
+      gl.bindVertexArray(vao);
+      gl.viewport(0, 0, simW, simH);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, texB.f);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, texA.t);
+      gl.uniform1i(su.prev, 0);
+      gl.uniform2f(su.texel, 1 / simW, 1 / simH);
+      gl.uniform2f(su.simSize, simW, simH);
+      const n = applyDrops ? Math.min(10, pending.length / 4) : 0;
+      gl.uniform1i(su.dropCount, n);
+      if (n) gl.uniform4fv(su.drops, new Float32Array(pending.slice(0, n * 4)));
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      const tmp = texA; texA = texB; texB = tmp;
+    }
+
+    function render(time){
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.useProgram(drawProg);
+      gl.bindVertexArray(vao);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, texA.t);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, reflTex);
+      gl.uniform1i(du.height, 0);
+      gl.uniform1i(du.refl, 1);
+      gl.uniform2f(du.size, waterWidth, waterHeight);
+      gl.uniform1f(du.surfaceY, surfaceY);
+      gl.uniform1f(du.time, time);
+      const light = isLight();
+      if (light) gl.uniform3f(du.lineCol, 34 / 255, 92 / 255, 104 / 255);
+      else gl.uniform3f(du.lineCol, 205 / 255, 229 / 255, 228 / 255);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+
+    function drawSimOverlay(time, dt){
+      waterCtx.clearRect(0, 0, waterWidth, waterHeight);
+      const light = isLight();
+      const line = light ? '34, 92, 104' : '205, 229, 228';
+      const glow = light ? '55, 112, 122' : '173, 211, 214';
+      simEnergy *= Math.pow(0.998, dt);
+      const surfaceGrad = waterCtx.createLinearGradient(0, surfaceY - 36, 0, waterHeight);
+      surfaceGrad.addColorStop(0, 'rgba(' + glow + ', ' + (0.018 + Math.min(0.05, simEnergy * 0.01)) + ')');
+      surfaceGrad.addColorStop(0.22, 'rgba(' + glow + ', ' + (light ? 0.035 : 0.045) + ')');
+      surfaceGrad.addColorStop(1, 'rgba(' + glow + ', 0)');
+      waterCtx.fillStyle = surfaceGrad;
+      waterCtx.fillRect(0, Math.max(0, surfaceY - 44), waterWidth, waterHeight);
+      drawDrops(dt, line);
+    }
+
+    function frame(time){
+      const dt = Math.min(60, time - prevTime);
+      prevTime = time;
+      if (!simW || !texA || !texB){ requestAnimationFrame(frame); return; }
+
+      const lit = brandIsLit(), light = isLight();
+      if (lit !== lastLit || light !== lastLight){
+        lastLit = lit;
+        lastLight = light;
+        reflDirty = true;
+      }
+      if (reflDirty && waterWidth){
+        drawReflectionSource();
+        uploadReflection();
+        reflDirty = false;
+      }
+
+      accum = Math.min(accum + dt, 48);
+      let first = true;
+      while (accum >= 7){
+        step(first);
+        first = false;
+        accum -= 7;
+      }
+      if (!first) pending.length = 0;
+
+      render(time);
+      drawSimOverlay(time, dt);
+      requestAnimationFrame(frame);
+    }
+
+    return { resize, disturb, frame, markDirty(){ reflDirty = true; } };
   }
 
   addEventListener('pointermove', e => {
@@ -966,7 +1287,7 @@ body.has-custom-cursor *{ cursor: none !important; }
     const wasInside = pointerInsideWater;
     pointerInsideWater = localY >= surfaceY - 16 && localY <= waterHeight;
     const movement = Math.hypot(pointerX - lastPointerX, pointerY - lastPointerY);
-    if (pointerInsideWater && (e.buttons || movement > 8 || !wasInside)){
+    if (pointerInsideWater && (e.buttons || movement > (simWater ? 2 : 8) || !wasInside)){
       disturbFromPointer(pointerX, pointerY, Math.min(2.4, 0.45 + movement * 0.035 + (e.buttons ? 0.8 : 0)));
     }
     lastPointerX = pointerX;
@@ -983,9 +1304,17 @@ body.has-custom-cursor *{ cursor: none !important; }
     pointerInsideWater = false;
   });
 
-  logoImg.addEventListener('load', () => drawWater(performance.now()), { once: true });
+  simWater = initSimWater();
   resizeWater();
-  requestAnimationFrame(drawWater);
+  if (simWater){
+    logoImg.addEventListener('load', () => simWater.markDirty(), { once: true });
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => simWater.markDirty());
+    requestAnimationFrame(simWater.frame);
+  } else {
+    document.getElementById('waterSim').style.display = 'none';
+    logoImg.addEventListener('load', () => drawWater(performance.now()), { once: true });
+    requestAnimationFrame(drawWater);
+  }
 
   addEventListener('resize', () => {
     clearTimeout(window.__rzt);
