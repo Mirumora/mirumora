@@ -659,7 +659,11 @@ body.has-custom-cursor *{ cursor: none !important; }
       lp.Q.value = 0.55 + Math.random() * 0.75;
       const bp = ctx.createBiquadFilter();
       bp.type = 'bandpass';
-      bp.frequency.value = Math.sqrt(low * high) * (0.8 + Math.random() * 0.4);
+      // splash noise darkens as the energy dissipates — a static filter is
+      // the giveaway that it's synthetic
+      const fc = Math.sqrt(low * high);
+      bp.frequency.setValueAtTime(fc * (1.05 + Math.random() * 0.35), at);
+      bp.frequency.exponentialRampToValueAtTime(fc * (0.55 + Math.random() * 0.25), at + dur);
       bp.Q.value = q || 0.9;
       const g = voice(x, wet == null ? 0.35 : wet);
       g.gain.setValueAtTime(0.0001, at);
@@ -690,12 +694,22 @@ body.has-custom-cursor *{ cursor: none !important; }
                  : band === 'high' ? 0.018 + Math.random() * 0.032
                  : 0.03 + Math.random() * 0.05) * (0.8 + size * 0.3);
       const amp = (opts.amp == null ? 0.014 : opts.amp) * velocity * (band === 'low' ? 0.9 : band === 'high' ? 0.62 : 1);
-      const g = voice(x, opts.wet == null ? 0.55 : opts.wet);
+      const g = voice(x, opts.wet == null ? 0.45 : opts.wet);
       const o = ctx.createOscillator();
       o.type = 'sine';
-      // Bubble entrainment: one upward chirp as the bubble contracts, no return sweep.
-      o.frequency.setValueAtTime(base * (0.78 + Math.random() * 0.12), at);
-      o.frequency.exponentialRampToValueAtTime(base * (1.35 + Math.random() * 0.55), at + dur);
+      // Bubble entrainment: pitch rises as the bubble contracts, but each real
+      // droplet follows its own bent, wobbly curve — identical two-point ramps
+      // are what makes a droplet field sound sequenced.
+      const N = 9;
+      const curve = new Float32Array(N);
+      const rise = 0.25 + Math.random() * 0.9;
+      const dip = Math.random() * 0.22;
+      for (let i = 0; i < N; i++){
+        const p = i / (N - 1);
+        const wobble = 1 + (Math.random() - 0.5) * 0.05;
+        curve[i] = base * (0.9 - dip * Math.sin(Math.PI * Math.min(1, p * 2.5)) + rise * Math.pow(p, 1.6)) * wobble;
+      }
+      o.frequency.setValueCurveAtTime(curve, at, dur);
       const hp = ctx.createBiquadFilter();
       hp.type = 'highpass';
       hp.frequency.value = Math.max(35, base * (0.45 + Math.random() * 0.2));
@@ -707,6 +721,21 @@ body.has-custom-cursor *{ cursor: none !important; }
       hp.connect(g);
       o.start(at);
       o.stop(at + dur + 0.025);
+      // faint inharmonic upper partial keeps the drop from reading as a pure tone
+      const ratio = 2.2 + Math.random() * 0.9;
+      if (base * ratio < 9000){
+        const o2 = ctx.createOscillator();
+        o2.type = 'sine';
+        const c2 = new Float32Array(N);
+        for (let i = 0; i < N; i++) c2[i] = curve[i] * ratio;
+        o2.frequency.setValueCurveAtTime(c2, at, dur);
+        const g2 = ctx.createGain();
+        g2.gain.value = 0.10 + Math.random() * 0.12;
+        o2.connect(g2);
+        g2.connect(hp);
+        o2.start(at);
+        o2.stop(at + dur + 0.025);
+      }
       if (Math.random() < (opts.noiseChance == null ? 0.5 : opts.noiseChance)){
         const low = band === 'low' ? 120 : band === 'mid' ? 500 : 2400;
         const high = band === 'low' ? 500 : band === 'mid' ? 3200 : 10000;
@@ -736,7 +765,10 @@ body.has-custom-cursor *{ cursor: none !important; }
         g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
         o.connect(g);
         o.start(t); o.stop(t + 0.22);
-        bandNoise(t, 0.09 + f * 0.03, origin, 0.005 + f * 0.004, 600, 7000, 0.85, 0.38);
+        // splash in two layers: bright initial burst, then a darker wet tail —
+        // real splashes carry more noise than tone
+        bandNoise(t, 0.045 + f * 0.02, origin, 0.006 + f * 0.005, 900, 9000, 0.8, 0.32);
+        bandNoise(t + 0.018, 0.13 + f * 0.05, origin, 0.004 + f * 0.003, 280, 2600, 0.7, 0.42);
       }
       const count = isDrag
         ? (Math.random() < 0.45 ? 1 + ((Math.random() * 2) | 0) : 0)
@@ -752,7 +784,7 @@ body.has-custom-cursor *{ cursor: none !important; }
         const fade = isDrag ? 1 : 1 - delay * 2;
         waterDroplet(t + delay, px, {
           band,
-          amp: (isDrag ? 0.005 : 0.011) * f * fade * (0.6 + Math.random() * 0.8),
+          amp: (isDrag ? 0.0045 : 0.009) * f * fade * (0.6 + Math.random() * 0.8),
           velocity: 0.7 + Math.random() * f * 0.5,
           wet: band === 'high' ? 0.7 : 0.5,
           noiseChance: isDrag ? 0.25 : 0.5
@@ -1671,12 +1703,16 @@ body.has-custom-cursor *{ cursor: none !important; }
     const glow = light ? '55, 112, 122' : '173, 211, 214';
     const surfacePulse = ripples.reduce((sum, ripple) => sum + ripple.life * ripple.strength, 0);
 
-    const surfaceGrad = waterCtx.createLinearGradient(0, surfaceY - 36, 0, waterHeight);
-    surfaceGrad.addColorStop(0, 'rgba(' + glow + ', ' + (0.018 + Math.min(0.05, surfacePulse * 0.01)) + ')');
-    surfaceGrad.addColorStop(0.22, 'rgba(' + glow + ', ' + (light ? 0.035 : 0.045) + ')');
+    // glow fades in from zero above the line so the wavy stroke is the only
+    // visible edge — a hard gradient start reads as a second horizon line
+    const gradTop = surfaceY - 36;
+    const surfaceGrad = waterCtx.createLinearGradient(0, gradTop, 0, waterHeight);
+    const lineStop = Math.min(1, 36 / Math.max(1, waterHeight - gradTop));
+    surfaceGrad.addColorStop(0, 'rgba(' + glow + ', 0)');
+    surfaceGrad.addColorStop(lineStop, 'rgba(' + glow + ', ' + ((light ? 0.035 : 0.045) + Math.min(0.05, surfacePulse * 0.01)) + ')');
     surfaceGrad.addColorStop(1, 'rgba(' + glow + ', 0)');
     waterCtx.fillStyle = surfaceGrad;
-    waterCtx.fillRect(0, Math.max(0, surfaceY - 44), waterWidth, waterHeight);
+    waterCtx.fillRect(0, Math.max(0, gradTop), waterWidth, waterHeight);
 
     waterCtx.save();
     waterCtx.beginPath();
@@ -2080,12 +2116,16 @@ body.has-custom-cursor *{ cursor: none !important; }
       const line = light ? '34, 92, 104' : '205, 229, 228';
       const glow = light ? '55, 112, 122' : '173, 211, 214';
       simEnergy *= Math.pow(0.998, dt);
-      const surfaceGrad = waterCtx.createLinearGradient(0, surfaceY - 36, 0, waterHeight);
-      surfaceGrad.addColorStop(0, 'rgba(' + glow + ', ' + (0.018 + Math.min(0.05, simEnergy * 0.01)) + ')');
-      surfaceGrad.addColorStop(0.22, 'rgba(' + glow + ', ' + (light ? 0.035 : 0.045) + ')');
+      // fade in from zero above the line — a hard gradient start reads as a
+      // second horizon line floating above the real water surface
+      const gradTop = surfaceY - 36;
+      const surfaceGrad = waterCtx.createLinearGradient(0, gradTop, 0, waterHeight);
+      const lineStop = Math.min(1, 36 / Math.max(1, waterHeight - gradTop));
+      surfaceGrad.addColorStop(0, 'rgba(' + glow + ', 0)');
+      surfaceGrad.addColorStop(lineStop, 'rgba(' + glow + ', ' + ((light ? 0.035 : 0.045) + Math.min(0.05, simEnergy * 0.01)) + ')');
       surfaceGrad.addColorStop(1, 'rgba(' + glow + ', 0)');
       waterCtx.fillStyle = surfaceGrad;
-      waterCtx.fillRect(0, Math.max(0, surfaceY - 44), waterWidth, waterHeight);
+      waterCtx.fillRect(0, Math.max(0, gradTop), waterWidth, waterHeight);
       drawDrops(dt, line);
     }
 
@@ -2150,8 +2190,58 @@ body.has-custom-cursor *{ cursor: none !important; }
     pointerInsideWater = false;
   });
 
+  /* ───── Intro — the brand surfaces ─────
+     The logo drifts down from above on a slower ease (the deeper parallax
+     layer) while "Mirumora" and STUDIO rise up through the waterline. A mask
+     pinned at the waterline hides whatever is still submerged — letting a
+     ghost of the type show through just below the surface — and small rings
+     ripple out where the letters break through. */
+  function runIntro(){
+    if (reduced) return;
+    const waterRect = water.getBoundingClientRect();
+    const surfaceScreen = waterRect.top + surfaceY;
+    const heroRect = hero.getBoundingClientRect();
+    const maskY = surfaceScreen - heroRect.top;   // waterline in hero-local coords
+    if (maskY < 40) return;                       // layout too tight to stage the rise
+    const rise = Math.max(60, surfaceScreen - title.getBoundingClientRect().top + 30);
+    const maskCss = 'linear-gradient(to bottom, black 0, black ' + (maskY - 2).toFixed(1) + 'px, rgba(0,0,0,0.28) ' + (maskY + 6).toFixed(1) + 'px, transparent ' + (maskY + 26).toFixed(1) + 'px)';
+    hero.style.webkitMaskImage = maskCss;
+    hero.style.maskImage = maskCss;
+    const ease = 'cubic-bezier(0.22, 1, 0.36, 1)';
+    const D = 2400, DELAY = 350;
+    mark.animate(
+      [{ transform: 'translateY(-44px)', opacity: 0 }, { transform: 'translateY(0)', opacity: 1 }],
+      { duration: 2000, easing: ease, fill: 'backwards' });
+    const riseFrames = [{ transform: 'translateY(' + rise.toFixed(1) + 'px)' }, { transform: 'translateY(0)' }];
+    title.animate(riseFrames, { duration: D, delay: DELAY, easing: ease, fill: 'backwards' });
+    studio.animate(riseFrames, { duration: D, delay: DELAY + 160, easing: ease, fill: 'backwards' });
+    const start = performance.now();
+    const total = DELAY + 160 + D + 60;
+    let lastRing = 0;
+    (function introFrame(now){
+      if (simWater) simWater.markDirty();   // reflection tracks the moving type
+      if (now - lastRing > 110){
+        for (const el of [title, studio]){
+          const r = el.getBoundingClientRect();
+          if (r.top < surfaceScreen && r.bottom > surfaceScreen){
+            lastRing = now;
+            disturbFromMagicDust(r.left + Math.random() * r.width, surfaceScreen, 0.5 + Math.random() * 0.5);
+            break;
+          }
+        }
+      }
+      if (now - start < total) requestAnimationFrame(introFrame);
+      else {
+        hero.style.webkitMaskImage = '';
+        hero.style.maskImage = '';
+        if (simWater) simWater.markDirty();
+      }
+    })(start);
+  }
+
   simWater = initSimWater();
   resizeWater();
+  runIntro();
   requestAnimationFrame(drawMagic);
   if (simWater){
     logoImg.addEventListener('load', () => simWater.markDirty(), { once: true });
