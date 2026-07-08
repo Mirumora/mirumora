@@ -699,17 +699,19 @@ body.has-custom-cursor *{ cursor: none !important; }
       o.type = 'sine';
       // Bubble entrainment: pitch rises as the bubble contracts, but each real
       // droplet follows its own bent, wobbly curve — identical two-point ramps
-      // are what makes a droplet field sound sequenced.
-      const N = 9;
-      const curve = new Float32Array(N);
+      // are what makes a droplet field sound sequenced. Chained ramps rather
+      // than setValueCurveAtTime: Safari throws on curve automation edge cases.
+      const N = 6;
+      const curve = [];
       const rise = 0.25 + Math.random() * 0.9;
       const dip = Math.random() * 0.22;
       for (let i = 0; i < N; i++){
         const p = i / (N - 1);
         const wobble = 1 + (Math.random() - 0.5) * 0.05;
-        curve[i] = base * (0.9 - dip * Math.sin(Math.PI * Math.min(1, p * 2.5)) + rise * Math.pow(p, 1.6)) * wobble;
+        curve.push(base * (0.9 - dip * Math.sin(Math.PI * Math.min(1, p * 2.5)) + rise * Math.pow(p, 1.6)) * wobble);
       }
-      o.frequency.setValueCurveAtTime(curve, at, dur);
+      o.frequency.setValueAtTime(curve[0], at);
+      for (let i = 1; i < N; i++) o.frequency.exponentialRampToValueAtTime(curve[i], at + dur * i / (N - 1));
       const hp = ctx.createBiquadFilter();
       hp.type = 'highpass';
       hp.frequency.value = Math.max(35, base * (0.45 + Math.random() * 0.2));
@@ -726,9 +728,8 @@ body.has-custom-cursor *{ cursor: none !important; }
       if (base * ratio < 9000){
         const o2 = ctx.createOscillator();
         o2.type = 'sine';
-        const c2 = new Float32Array(N);
-        for (let i = 0; i < N; i++) c2[i] = curve[i] * ratio;
-        o2.frequency.setValueCurveAtTime(c2, at, dur);
+        o2.frequency.setValueAtTime(curve[0] * ratio, at);
+        for (let i = 1; i < N; i++) o2.frequency.exponentialRampToValueAtTime(curve[i] * ratio, at + dur * i / (N - 1));
         const g2 = ctx.createGain();
         g2.gain.value = 0.10 + Math.random() * 0.12;
         o2.connect(g2);
@@ -812,7 +813,7 @@ body.has-custom-cursor *{ cursor: none !important; }
       o2.start(at); o2.stop(at + 1.2);
     }
 
-    return {
+    const api = {
       unlock,
       get muted(){ return muted; },
       toggle(){
@@ -941,6 +942,14 @@ body.has-custom-cursor *{ cursor: none !important; }
         o.start(t); o.stop(t + 0.13);
       }
     };
+    // Sound runs inside render loops and input handlers — a Web Audio quirk
+    // (Safari's stricter automation rules, a torn-down context) must never
+    // kill the caller, so every trigger is firewalled.
+    ['unlock', 'toggle', 'plop', 'swish', 'plink', 'chime', 'shimmer', 'tick'].forEach(k => {
+      const fn = api[k];
+      api[k] = function(){ try { return fn.apply(api, arguments); } catch(e){} };
+    });
+    return api;
   })();
   window.__mirSound = sound;   // small debug handle (used by automated checks)
 
@@ -2229,34 +2238,44 @@ body.has-custom-cursor *{ cursor: none !important; }
     // before it starts to rise
     const ease = 'cubic-bezier(0.33, 1, 0.55, 1)';
     const D = 2600, DELAY = 750;
-    mark.animate(
-      [{ transform: 'translateY(-44px)', opacity: 0 }, { transform: 'translateY(0)', opacity: 1 }],
-      { duration: 2000, easing: ease, fill: 'backwards' });
-    const riseFrames = [{ transform: 'translateY(' + rise.toFixed(1) + 'px)' }, { transform: 'translateY(0)' }];
-    title.animate(riseFrames, { duration: D, delay: DELAY, easing: ease, fill: 'backwards' });
-    studio.animate(riseFrames, { duration: D, delay: DELAY + 160, easing: ease, fill: 'backwards' });
+    try {
+      mark.animate(
+        [{ transform: 'translateY(-44px)', opacity: 0 }, { transform: 'translateY(0)', opacity: 1 }],
+        { duration: 2000, easing: ease, fill: 'backwards' });
+      const riseFrames = [{ transform: 'translateY(' + rise.toFixed(1) + 'px)' }, { transform: 'translateY(0)' }];
+      title.animate(riseFrames, { duration: D, delay: DELAY, easing: ease, fill: 'backwards' });
+      studio.animate(riseFrames, { duration: D, delay: DELAY + 160, easing: ease, fill: 'backwards' });
+    } catch(e){
+      introWet = false;
+      hero.style.webkitMaskImage = '';
+      hero.style.maskImage = '';
+      return;
+    }
     const start = performance.now();
     const total = DELAY + 160 + D + 60;
     let lastRing = 0;
+    const finish = () => {
+      introWet = false;
+      hero.style.webkitMaskImage = '';
+      hero.style.maskImage = '';
+      if (simWater) simWater.markDirty();
+    };
     (function introFrame(now){
-      if (simWater) simWater.markDirty();   // refraction + reflection track the moving type
-      if (now - lastRing > 110){
-        for (const el of [title, studio]){
-          const r = el.getBoundingClientRect();
-          if (r.top < surfaceScreen && r.bottom > surfaceScreen){
-            lastRing = now;
-            disturbFromMagicDust(r.left + Math.random() * r.width, surfaceScreen, 0.5 + Math.random() * 0.5);
-            break;
+      try {
+        if (simWater) simWater.markDirty();   // refraction + reflection track the moving type
+        if (now - lastRing > 110){
+          for (const el of [title, studio]){
+            const r = el.getBoundingClientRect();
+            if (r.top < surfaceScreen && r.bottom > surfaceScreen){
+              lastRing = now;
+              disturbFromMagicDust(r.left + Math.random() * r.width, surfaceScreen, 0.5 + Math.random() * 0.5);
+              break;
+            }
           }
         }
-      }
+      } catch(e){ finish(); return; }
       if (now - start < total) requestAnimationFrame(introFrame);
-      else {
-        introWet = false;
-        hero.style.webkitMaskImage = '';
-        hero.style.maskImage = '';
-        if (simWater) simWater.markDirty();
-      }
+      else finish();
     })(start);
   }
 
@@ -2291,8 +2310,8 @@ body.has-custom-cursor *{ cursor: none !important; }
 
   simWater = initSimWater();
   resizeWater();
-  scheduleIntro();
   requestAnimationFrame(drawMagic);
+  scheduleIntro();   // after the render loops — intro trouble must never block them
   if (simWater){
     logoImg.addEventListener('load', () => simWater.markDirty(), { once: true });
     if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => simWater.markDirty());
