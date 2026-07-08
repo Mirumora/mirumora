@@ -1274,6 +1274,7 @@ body.has-custom-cursor *{ cursor: none !important; }
   const underDust = [];  // flakes below the surface — rendered inside the water sim so real waves refract them
   let simWater = null;   // WebGL2 ripple physics — null means the legacy 2D path runs
   let simEnergy = 0;     // recent-disturbance energy, drives the surface glow pulse
+  let introWet = false;  // intro: type is submerged — render it into the refraction texture
 
   const reflectionCanvas = document.createElement('canvas');
   const reflectionCtx = reflectionCanvas.getContext('2d');
@@ -1426,6 +1427,14 @@ body.has-custom-cursor *{ cursor: none !important; }
     drawReflectedSplit(reflectionCtx, title, waterRect, colorForCssVar('--bone'), isLight() ? 0.16 : 0.20, glow);
     drawReflectedSplit(reflectionCtx, studio, waterRect, colorForCssVar('--bone-dim'), isLight() ? 0.13 : 0.16, glow);
     reflectionCtx.restore();
+
+    if (introWet){
+      // intro: the type is still underwater — draw it unmirrored at its live
+      // position so the water shader refracts it like an object below the
+      // surface (the depth fade below dims it the deeper it sits)
+      drawReflectedSplit(reflectionCtx, title, waterRect, colorForCssVar('--bone'), isLight() ? 0.50 : 0.55, null);
+      drawReflectedSplit(reflectionCtx, studio, waterRect, colorForCssVar('--bone-dim'), isLight() ? 0.40 : 0.45, null);
+    }
 
     reflectionCtx.save();
     const fade = reflectionCtx.createLinearGradient(0, surfaceY, 0, waterHeight);
@@ -2197,18 +2206,29 @@ body.has-custom-cursor *{ cursor: none !important; }
      ghost of the type show through just below the surface — and small rings
      ripple out where the letters break through. */
   function runIntro(){
-    if (reduced) return;
+    if (reduced){
+      // no vertical motion — just fade the brand in gently
+      [mark, title, studio].forEach((el, i) => el.animate(
+        [{ opacity: 0 }, { opacity: 1 }],
+        { duration: 900, delay: i * 140, easing: 'ease-out', fill: 'backwards' }));
+      return;
+    }
     const waterRect = water.getBoundingClientRect();
     const surfaceScreen = waterRect.top + surfaceY;
     const heroRect = hero.getBoundingClientRect();
     const maskY = surfaceScreen - heroRect.top;   // waterline in hero-local coords
     if (maskY < 40) return;                       // layout too tight to stage the rise
     const rise = Math.max(60, surfaceScreen - title.getBoundingClientRect().top + 30);
-    const maskCss = 'linear-gradient(to bottom, black 0, black ' + (maskY - 2).toFixed(1) + 'px, rgba(0,0,0,0.28) ' + (maskY + 6).toFixed(1) + 'px, transparent ' + (maskY + 26).toFixed(1) + 'px)';
+    // the DOM type is fully hidden below the line — the underwater view comes
+    // from the refraction texture (introWet), which the waves distort
+    const maskCss = 'linear-gradient(to bottom, black 0, black ' + (maskY - 3).toFixed(1) + 'px, transparent ' + (maskY + 5).toFixed(1) + 'px)';
     hero.style.webkitMaskImage = maskCss;
     hero.style.maskImage = maskCss;
-    const ease = 'cubic-bezier(0.22, 1, 0.36, 1)';
-    const D = 2400, DELAY = 350;
+    introWet = true;
+    // hold the type submerged for a beat so the refracted ghost registers
+    // before it starts to rise
+    const ease = 'cubic-bezier(0.33, 1, 0.55, 1)';
+    const D = 2600, DELAY = 750;
     mark.animate(
       [{ transform: 'translateY(-44px)', opacity: 0 }, { transform: 'translateY(0)', opacity: 1 }],
       { duration: 2000, easing: ease, fill: 'backwards' });
@@ -2219,7 +2239,7 @@ body.has-custom-cursor *{ cursor: none !important; }
     const total = DELAY + 160 + D + 60;
     let lastRing = 0;
     (function introFrame(now){
-      if (simWater) simWater.markDirty();   // reflection tracks the moving type
+      if (simWater) simWater.markDirty();   // refraction + reflection track the moving type
       if (now - lastRing > 110){
         for (const el of [title, studio]){
           const r = el.getBoundingClientRect();
@@ -2232,6 +2252,7 @@ body.has-custom-cursor *{ cursor: none !important; }
       }
       if (now - start < total) requestAnimationFrame(introFrame);
       else {
+        introWet = false;
         hero.style.webkitMaskImage = '';
         hero.style.maskImage = '';
         if (simWater) simWater.markDirty();
@@ -2239,9 +2260,38 @@ body.has-custom-cursor *{ cursor: none !important; }
     })(start);
   }
 
+  // The intro must not play to a hidden tab: WAAPI runs on wall-clock time, so
+  // a page opened in the background (local.sh's `open`, a cmd-click, a deploy
+  // preview) would finish the whole sequence before anyone sees it. Wait for
+  // visibility, then give the webfonts a beat to settle so measurements hold.
+  function scheduleIntro(){
+    const begin = () => {
+      let started = false;
+      const go = () => {
+        if (started) return;
+        started = true;
+        requestAnimationFrame(() => runIntro());
+      };
+      if (document.fonts && document.fonts.ready){
+        document.fonts.ready.then(go);
+        setTimeout(go, 700);   // don't stall the intro on a slow font CDN
+      } else go();
+    };
+    if (document.visibilityState !== 'hidden') begin();
+    else {
+      const onVis = () => {
+        if (document.visibilityState !== 'hidden'){
+          document.removeEventListener('visibilitychange', onVis);
+          begin();
+        }
+      };
+      document.addEventListener('visibilitychange', onVis);
+    }
+  }
+
   simWater = initSimWater();
   resizeWater();
-  runIntro();
+  scheduleIntro();
   requestAnimationFrame(drawMagic);
   if (simWater){
     logoImg.addEventListener('load', () => simWater.markDirty(), { once: true });
