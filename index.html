@@ -558,11 +558,11 @@ body.has-custom-cursor *{ cursor: none !important; }
   const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   /* ───── Sound design — procedural Web Audio, no samples ─────
-     Everything is synthesized live: water taps are pitch-dropping sines with
-     a whisper of noise splash, dust lands as tiny wet pentatonic plinks, a
-     click blooms into a bell arpeggio over a warm low swell. Pitch and level
-     are randomized per event so nothing ever repeats exactly. The context is
-     created lazily on the first user gesture (browser autoplay policy). */
+     Everything is synthesized live: water interactions use layered droplet
+     chains with randomized impulse density, bubble-like pitch curves, noise
+     transients, and turbulence beds. Dust lands as tiny wet plinks, and clicks
+     bloom into a bell arpeggio over a warm low swell. The context is created
+     lazily on the first user gesture (browser autoplay policy). */
   const sound = (function(){
     const KEY = 'mir-sound';
     let muted = false;
@@ -647,6 +647,119 @@ body.has-custom-cursor *{ cursor: none !important; }
       return n;
     }
 
+    function bandNoise(at, dur, x, amp, low, high, q, wet){
+      const n = noiseSrc();
+      const hp = ctx.createBiquadFilter();
+      hp.type = 'highpass';
+      hp.frequency.value = low * (0.85 + Math.random() * 0.3);
+      hp.Q.value = 0.7 + Math.random() * 0.8;
+      const lp = ctx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.value = high * (0.88 + Math.random() * 0.24);
+      lp.Q.value = 0.55 + Math.random() * 0.75;
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.value = Math.sqrt(low * high) * (0.8 + Math.random() * 0.4);
+      bp.Q.value = q || 0.9;
+      const g = voice(x, wet == null ? 0.35 : wet);
+      g.gain.setValueAtTime(0.0001, at);
+      g.gain.exponentialRampToValueAtTime(Math.max(0.0002, amp), at + Math.min(0.035, dur * 0.22));
+      g.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+      n.connect(hp);
+      hp.connect(lp);
+      lp.connect(bp);
+      bp.connect(g);
+      n.start(at);
+      n.stop(at + dur + 0.03);
+    }
+
+    function waterDroplet(at, x, opts){
+      opts = opts || {};
+      const band = opts.band || 'mid';
+      const ranges = {
+        low: [95, 245],
+        mid: [280, 1300],
+        high: [1700, 6500]
+      };
+      const r = ranges[band] || ranges.mid;
+      const size = opts.size == null ? 1 : opts.size;
+      const velocity = opts.velocity == null ? 1 : opts.velocity;
+      const base = r[0] * Math.pow(r[1] / r[0], Math.random());
+      // Real plinks are 15–150ms; longer pitch-swept sines read as slide whistles.
+      const dur = (band === 'low' ? 0.08 + Math.random() * 0.09
+                 : band === 'high' ? 0.018 + Math.random() * 0.032
+                 : 0.03 + Math.random() * 0.05) * (0.8 + size * 0.3);
+      const amp = (opts.amp == null ? 0.014 : opts.amp) * velocity * (band === 'low' ? 0.9 : band === 'high' ? 0.62 : 1);
+      const g = voice(x, opts.wet == null ? 0.55 : opts.wet);
+      const o = ctx.createOscillator();
+      o.type = 'sine';
+      // Bubble entrainment: one upward chirp as the bubble contracts, no return sweep.
+      o.frequency.setValueAtTime(base * (0.78 + Math.random() * 0.12), at);
+      o.frequency.exponentialRampToValueAtTime(base * (1.35 + Math.random() * 0.55), at + dur);
+      const hp = ctx.createBiquadFilter();
+      hp.type = 'highpass';
+      hp.frequency.value = Math.max(35, base * (0.45 + Math.random() * 0.2));
+      hp.Q.value = 0.7 + Math.random() * 0.6;
+      g.gain.setValueAtTime(0.0001, at);
+      g.gain.exponentialRampToValueAtTime(Math.max(0.0002, amp), at + 0.003 + Math.random() * 0.006);
+      g.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+      o.connect(hp);
+      hp.connect(g);
+      o.start(at);
+      o.stop(at + dur + 0.025);
+      if (Math.random() < (opts.noiseChance == null ? 0.5 : opts.noiseChance)){
+        const low = band === 'low' ? 120 : band === 'mid' ? 500 : 2400;
+        const high = band === 'low' ? 500 : band === 'mid' ? 3200 : 10000;
+        bandNoise(at, 0.02 + Math.random() * 0.04, x, amp * (0.3 + Math.random() * 0.4), low, high, 0.8 + Math.random() * 1.2, 0.4);
+      }
+    }
+
+    function waterCluster(x, force, profile){
+      if (!ok()) return;
+      const t = ctx.currentTime;
+      const origin = x == null ? innerWidth / 2 : x;
+      const f = Math.max(0.2, Math.min(2.8, force || 1));
+      const isDrag = profile === 'drag';
+      if (isDrag){
+        // flow is mostly turbulence: a soft mid-band wash, droplets only as accents
+        bandNoise(t, 0.20 + Math.random() * 0.10, origin, 0.0030 + f * 0.0028, 170, 1100 + f * 600, 0.65, 0.22);
+      } else {
+        // impact: cavity thump (short downward sine) + splash burst
+        const f0 = 200 - f * 30 + Math.random() * 30;
+        const o = ctx.createOscillator();
+        o.type = 'sine';
+        o.frequency.setValueAtTime(f0 * 1.5, t);
+        o.frequency.exponentialRampToValueAtTime(f0 * 0.6, t + 0.10);
+        const g = voice(origin, 0.4);
+        g.gain.setValueAtTime(0, t);
+        g.gain.linearRampToValueAtTime(0.018 + f * 0.014, t + 0.009);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+        o.connect(g);
+        o.start(t); o.stop(t + 0.22);
+        bandNoise(t, 0.09 + f * 0.03, origin, 0.005 + f * 0.004, 600, 7000, 0.85, 0.38);
+      }
+      const count = isDrag
+        ? (Math.random() < 0.45 ? 1 + ((Math.random() * 2) | 0) : 0)
+        : 4 + ((f * 2) | 0);
+      for (let i = 0; i < count; i++){
+        const r = Math.random();
+        const band = isDrag
+          ? (r < 0.6 ? 'mid' : 'high')
+          : (r < 0.12 ? 'low' : r < 0.58 ? 'mid' : 'high');
+        // tap drips trail the splash, early-weighted and fading with delay
+        const delay = isDrag ? Math.random() * 0.07 : 0.02 + Math.pow(Math.random(), 1.6) * 0.30;
+        const px = origin + (Math.random() - 0.5) * (isDrag ? 70 : 44);
+        const fade = isDrag ? 1 : 1 - delay * 2;
+        waterDroplet(t + delay, px, {
+          band,
+          amp: (isDrag ? 0.005 : 0.011) * f * fade * (0.6 + Math.random() * 0.8),
+          velocity: 0.7 + Math.random() * f * 0.5,
+          wet: band === 'high' ? 0.7 : 0.5,
+          noiseChance: isDrag ? 0.25 : 0.5
+        });
+      }
+    }
+
     function bell(freq, at, amp, x){
       const g = voice(x, 0.8);
       const o = ctx.createOscillator();
@@ -688,83 +801,45 @@ body.has-custom-cursor *{ cursor: none !important; }
         return Math.sqrt(sum / buf.length);
       },
 
-      // water tap — the classic "bloop": quick pitch drop + noise splash
+      // water tap — cavity thump + splash burst + a sparse trail of droplet chirps
       plop(force, x){
-        if (!ok()) return;
-        const t = ctx.currentTime;
-        const f = Math.min(2.4, force);
-        const g = voice(x, 0.35);
-        const f0 = 300 - f * 60 + Math.random() * 40;
-        const o = ctx.createOscillator();
-        o.type = 'sine';
-        o.frequency.setValueAtTime(f0 * 1.6, t);
-        o.frequency.exponentialRampToValueAtTime(f0 * 0.55, t + 0.16 + f * 0.05);
-        g.gain.setValueAtTime(0, t);
-        g.gain.linearRampToValueAtTime(0.05 + f * 0.055, t + 0.012);
-        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.28 + f * 0.09);
-        o.connect(g);
-        o.start(t); o.stop(t + 0.6);
-        if (f > 0.9){
-          const n = noiseSrc();
-          const bp = ctx.createBiquadFilter();
-          bp.type = 'bandpass';
-          bp.frequency.value = 1400 + Math.random() * 900;
-          bp.Q.value = 1.1;
-          const ng = voice(x, 0.5);
-          ng.gain.setValueAtTime(0, t);
-          ng.gain.linearRampToValueAtTime(0.014 + f * 0.012, t + 0.02);
-          ng.gain.exponentialRampToValueAtTime(0.0001, t + 0.24);
-          n.connect(bp);
-          bp.connect(ng);
-          n.start(t); n.stop(t + 0.3);
-        }
+        waterCluster(x, force, 'tap');
       },
 
-      // dragging through the water — a barely-there filtered wash
+      // dragging through the water — a turbulence wash with sparse droplet accents
       swish(force, x){
         if (!ok()) return;
         const t = ctx.currentTime;
         if (t - lastSwish < 0.09) return;
         lastSwish = t;
-        const n = noiseSrc();
-        const lp = ctx.createBiquadFilter();
-        lp.type = 'lowpass';
-        lp.frequency.setValueAtTime(300, t);
-        lp.frequency.linearRampToValueAtTime(700 + force * 300, t + 0.05);
-        lp.frequency.linearRampToValueAtTime(250, t + 0.22);
-        const g = voice(x, 0.3);
-        g.gain.setValueAtTime(0, t);
-        g.gain.linearRampToValueAtTime(0.008 + Math.min(0.014, force * 0.008), t + 0.04);
-        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.26);
-        n.connect(lp);
-        lp.connect(g);
-        n.start(t); n.stop(t + 0.3);
+        waterCluster(x, Math.min(1.6, force * 0.72), 'drag');
       },
 
       // a dust flake meets the water — tiny wet plink, far away in the reverb
       plink(x, size){
         if (!ok()) return;
         const t = ctx.currentTime;
+        size = size == null ? 0.8 : size;
         if (t - lastPlink < 0.045 || Math.random() < 0.35) return;
         lastPlink = t;
-        const base = PENTA[(Math.random() * PENTA.length) | 0] * (Math.random() < 0.3 ? 2 : 1);
-        const g = voice(x, 0.85);
-        const o = ctx.createOscillator();
-        o.type = 'sine';
-        o.frequency.value = base * (0.99 + Math.random() * 0.02);
-        const o2 = ctx.createOscillator();
-        o2.type = 'sine';
-        o2.frequency.value = base * 2.76;
-        const g2 = ctx.createGain();
-        g2.gain.value = 0.35;
-        o2.connect(g2);
-        g2.connect(g);
-        g.gain.setValueAtTime(0, t);
-        g.gain.linearRampToValueAtTime(0.010 + Math.min(0.02, size * 0.012), t + 0.006);
-        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.5 + Math.random() * 0.4);
-        o.connect(g);
-        o.start(t); o.stop(t + 1);
-        o2.start(t); o2.stop(t + 1);
+        waterDroplet(t, x, {
+          band: Math.random() < 0.82 ? 'high' : 'mid',
+          amp: 0.008 + Math.min(0.018, size * 0.009),
+          velocity: 0.7 + Math.random() * 0.8,
+          size: 0.45 + size * 0.45,
+          wet: 0.9,
+          noiseChance: 0.42
+        });
+        if (size > 1 || Math.random() < 0.28){
+          waterDroplet(t + 0.028 + Math.random() * 0.055, x + (Math.random() - 0.5) * 28, {
+            band: 'mid',
+            amp: 0.004 + size * 0.003,
+            velocity: 0.55 + Math.random() * 0.55,
+            size: 0.55,
+            wet: 0.82,
+            noiseChance: 0.25
+          });
+        }
       },
 
       // click pulse — ascending bell arpeggio over a warm swell that lingers
